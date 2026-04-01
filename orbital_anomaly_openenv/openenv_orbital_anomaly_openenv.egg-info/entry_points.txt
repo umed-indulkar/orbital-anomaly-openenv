@@ -1,0 +1,2 @@
+[console_scripts]
+server = orbital_anomaly_openenv.server.app:main
