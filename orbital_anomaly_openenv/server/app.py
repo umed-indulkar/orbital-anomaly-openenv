@@ -9,23 +9,6 @@ FastAPI application for the Orbital Anomaly Openenv Environment.
 
 This module creates an HTTP server that exposes the OrbitalAnomalyOpenenvEnvironment
 over HTTP and WebSocket endpoints, compatible with EnvClient.
-
-Endpoints:
-    - POST /reset: Reset the environment
-    - POST /step: Execute an action
-    - GET /state: Get current environment state
-    - GET /schema: Get action/observation schemas
-    - WS /ws: WebSocket endpoint for persistent sessions
-
-Usage:
-    # Development (with auto-reload):
-    uvicorn server.app:app --reload --host 0.0.0.0 --port 8000
-
-    # Production:
-    uvicorn server.app:app --host 0.0.0.0 --port 8000 --workers 4
-
-    # Or run directly:
-    python -m server.app
 """
 
 try:
@@ -35,6 +18,8 @@ except Exception as e:  # pragma: no cover
         "openenv is required for the web interface. Install dependencies with '\n    uv sync\n'"
     ) from e
 
+from fastapi.responses import HTMLResponse
+
 try:
     from ..models import OrbitalAnomalyOpenenvAction, OrbitalAnomalyOpenenvObservation
     from .orbital_anomaly_openenv_environment import OrbitalAnomalyOpenenvEnvironment
@@ -43,54 +28,105 @@ except ModuleNotFoundError:
     from server.orbital_anomaly_openenv_environment import OrbitalAnomalyOpenenvEnvironment
 
 
-# Create the app with web interface and README integration
+# Create OpenEnv FastAPI app
 app = create_app(
     OrbitalAnomalyOpenenvEnvironment,
     OrbitalAnomalyOpenenvAction,
     OrbitalAnomalyOpenenvObservation,
     env_name="orbital_anomaly_openenv",
-    max_concurrent_envs=1,  # increase this number to allow more concurrent WebSocket sessions
+    max_concurrent_envs=1,
 )
 
-'''
-def main(host: str = "0.0.0.0", port: int = 8000):
+
+# Premium landing UI for Hugging Face Space App tab
+@app.get("/", response_class=HTMLResponse)
+def home():
+    return """
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Orbital Anomaly OpenEnv</title>
+        <style>
+            body {
+                margin: 0;
+                font-family: Arial, sans-serif;
+                background: linear-gradient(135deg, #0b1020, #111827);
+                color: white;
+                display: flex;
+                justify-content: center;
+                align-items: center;
+                min-height: 100vh;
+            }
+            .card {
+                width: 850px;
+                max-width: 90%;
+                background: rgba(255,255,255,0.06);
+                border: 1px solid rgba(255,255,255,0.12);
+                border-radius: 20px;
+                padding: 40px;
+                box-shadow: 0 20px 50px rgba(0,0,0,0.35);
+            }
+            h1 {
+                margin-top: 0;
+                font-size: 44px;
+            }
+            p {
+                color: #cbd5e1;
+                line-height: 1.6;
+                font-size: 18px;
+            }
+            .grid {
+                display: grid;
+                grid-template-columns: repeat(2, minmax(0, 1fr));
+                gap: 16px;
+                margin-top: 28px;
+            }
+            .btn {
+                display: block;
+                text-decoration: none;
+                color: white;
+                padding: 18px;
+                border-radius: 14px;
+                background: rgba(255,255,255,0.08);
+                border: 1px solid rgba(255,255,255,0.12);
+                transition: 0.2s ease;
+                font-size: 17px;
+            }
+            .btn:hover {
+                transform: translateY(-2px);
+                background: rgba(255,255,255,0.14);
+            }
+            .footer {
+                margin-top: 28px;
+                color: #94a3b8;
+                font-size: 14px;
+            }
+        </style>
+    </head>
+    <body>
+        <div class="card">
+            <h1>🛰️ Orbital Anomaly OpenEnv</h1>
+            <p>
+                A mission-control simulator for diagnosing cascading satellite subsystem anomalies
+                and applying multi-step recovery strategies across power, thermal, communication,
+                and payload systems.
+            </p>
+
+            <div class="grid">
+                <a class="btn" href="/docs">📘 Interactive API Docs</a>
+                <a class="btn" href="/schema">🧩 JSON Schema</a>
+                <a class="btn" href="/state">📡 Live Environment State</a>
+                <a class="btn" href="/openapi.json">⚙️ OpenAPI Spec</a>
+            </div>
+
+            <div class="footer">
+                Built with OpenEnv • FastAPI • Hugging Face Spaces
+            </div>
+        </div>
+    </body>
+    </html>
     """
-    Entry point for direct execution via uv run or python -m.
 
-    This function enables running the server without Docker:
-        uv run --project . server
-        uv run --project . server --port 8001
-        python -m orbital_anomaly_openenv.server.app
-
-    Args:
-        host: Host address to bind to (default: "0.0.0.0")
-        port: Port number to listen on (default: 8000)
-
-    For production deployments, consider using uvicorn directly with
-    multiple workers:
-        uvicorn orbital_anomaly_openenv.server.app:app --workers 4
-    """
-    import uvicorn
-
-    uvicorn.run(app, host=host, port=port)
-
-
-if __name__ == "__main__":
-    import argparse
-
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--port", type=int, default=8000)
-    args = parser.parse_args()
-    main(port=args.port)
-
-def main():
-    import uvicorn
-    uvicorn.run("server.app:app", host="0.0.0.0", port=8000, reload=False)
-
-
-if __name__ == "__main__":
-    main()
-'''
 
 def main():
     import uvicorn
