@@ -1,8 +1,8 @@
 import os
 from openai import OpenAI
 
-from .client import OrbitalAnomalyOpenenvEnv
-from .models import OrbitalAnomalyOpenenvAction
+from orbital_anomaly_openenv.client import OrbitalAnomalyOpenenvEnv
+from orbital_anomaly_openenv.models import OrbitalAnomalyOpenenvAction
 
 
 # LLM router (required by checklist)
@@ -46,6 +46,7 @@ def choose_action(obs):
         return "enter_safe_mode"
 
     return "noop"
+
 
 def main():
     print("[START] orbital anomaly recovery baseline")

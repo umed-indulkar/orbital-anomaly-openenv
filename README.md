@@ -14,7 +14,7 @@ A cloud-deployable **satellite anomaly response simulation benchmark** built wit
 
 This environment simulates realistic spacecraft subsystem failures where an autonomous agent acts as **mission control** and must stabilize the satellite through multi-step corrective actions.
 
-It is designed as a **real-world decision-making benchmark** for evaluating frontier LLM and RL agents on long-horizon anomaly recovery tasks. 
+It is designed as a **real-world decision-making benchmark** for evaluating frontier LLM and RL agents on long-horizon anomaly recovery tasks.
 
 ---
 
@@ -98,7 +98,7 @@ Thermal overload + moderate power degradation
 ## 🔴 Hard
 Simultaneous battery, thermal, and communication collapse
 
-This satisfies the **minimum 3-task grader requirement**. 
+This satisfies the **minimum 3-task grader requirement**.
 
 ---
 
@@ -107,7 +107,6 @@ This satisfies the **minimum 3-task grader requirement**.
 The reward is a **dense trajectory signal in the range 0.0–1.0**.
 
 It combines:
-
 - battery health
 - thermal stability
 - communication quality
@@ -119,7 +118,7 @@ This provides:
 - smooth optimization signal
 - deterministic grading
 
-Exactly aligned with OpenEnv scoring requirements. :contentReference[oaicite:3]{index=3}
+Exactly aligned with OpenEnv scoring requirements.
 
 ---
 
@@ -149,13 +148,11 @@ uv run server
 ```
 
 Server starts at:
-
 ```text
 http://localhost:8000
 ```
 
 Docs:
-
 ```text
 http://localhost:8000/docs
 ```
@@ -164,12 +161,11 @@ http://localhost:8000/docs
 
 # 🧪 Run Baseline Inference
 
-The repository includes a **reproducible baseline agent**.
+The repository includes a **reproducible heuristic baseline agent**.
 
 Run:
-
 ```bash
-py -m orbital_anomaly_openenv.inference
+py inference.py
 ```
 
 Expected output:
@@ -180,20 +176,18 @@ Expected output:
 [END] final_reward=0.647
 ```
 
-This satisfies the mandatory **baseline reproducibility requirement**. 
+This satisfies the mandatory **baseline reproducibility and repo-root inference requirement**.
 
 ---
 
 # 🐳 Docker Build
 
 Build locally:
-
 ```bash
 docker build -t orbital-anomaly-openenv .
 ```
 
 Run:
-
 ```bash
 docker run -p 8000:8000 orbital-anomaly-openenv
 ```
@@ -203,33 +197,33 @@ docker run -p 8000:8000 orbital-anomaly-openenv
 # ☁️ Deploy to Hugging Face Spaces
 
 Push latest repo:
-
 ```bash
 git push origin main
 git push hf main
 ```
 
-HF auto-builds the Docker Space.
+Hugging Face automatically rebuilds the Docker Space.
 
 ---
 
 # 📂 Project Structure
 
 ```text
-orbital_anomaly_openenv/
-├── __init__.py
-├── client.py
+orbital-anomaly-openenv/
 ├── inference.py
-├── models.py
-├── openenv.yaml
-├── README.md
-├── server/
-│   ├── app.py
-│   ├── orbital_anomaly_openenv_environment.py
-│   └── __init__.py
 ├── Dockerfile
+├── README.md
 ├── pyproject.toml
-└── uv.lock
+├── uv.lock
+├── openenv.yaml
+└── orbital_anomaly_openenv/
+    ├── __init__.py
+    ├── client.py
+    ├── models.py
+    └── server/
+        ├── __init__.py
+        ├── app.py
+        └── orbital_anomaly_openenv_environment.py
 ```
 
 ---
@@ -251,7 +245,7 @@ This benchmark introduces a **spacecraft anomaly response domain**, which is:
 - causally rich
 - highly novel
 
-This strongly improves **novelty + real-world utility scores**. :contentReference[oaicite:5]{index=5}
+This strongly improves **novelty + real-world utility scores**.
 
 ---
 
@@ -277,4 +271,4 @@ POST /step → 200
 GET /state → 200
 ```
 
-This matches official validation flow. 
+This matches the official validation flow.
