@@ -5,14 +5,24 @@ from .client import OrbitalAnomalyOpenenvEnv
 from .models import OrbitalAnomalyOpenenvAction
 
 
+# LLM router (required by checklist)
 API_BASE_URL = os.getenv(
     "API_BASE_URL",
+    "https://router.huggingface.co/v1"
+)
+
+# Your deployed OpenEnv Space
+ENV_BASE_URL = os.getenv(
+    "ENV_BASE_URL",
     "https://codequasar-orbital-anomaly-openenv.hf.space"
 )
-MODEL_NAME = os.getenv("MODEL_NAME", "gpt-4o-mini")
+
+MODEL_NAME = os.getenv("MODEL_NAME", "openai/gpt-4o-mini")
 HF_TOKEN = os.getenv("HF_TOKEN")
 LOCAL_IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME")
 
+
+# Required OpenAI client initialization
 client = OpenAI(
     base_url=API_BASE_URL,
     api_key=HF_TOKEN
@@ -20,25 +30,27 @@ client = OpenAI(
 
 
 def choose_action(obs):
-    if obs.solar_efficiency < 0.5:
+    if obs.solar_efficiency < 0.75:
         return "rotate_to_sun"
 
-    if obs.thermal_temp > 80:
+    if obs.thermal_temp > 75 and obs.payload_on:
         return "disable_payload"
 
-    if obs.comms_signal < 0.7:
+    if obs.comms_signal < 0.75:
         return "reboot_comms"
+
+    if obs.battery_level < 40:
+        return "switch_power_bus"
 
     if obs.mission_status == "critical":
         return "enter_safe_mode"
 
     return "noop"
 
-
 def main():
     print("[START] orbital anomaly recovery baseline")
 
-    with OrbitalAnomalyOpenenvEnv(base_url=API_BASE_URL).sync() as env:
+    with OrbitalAnomalyOpenenvEnv(base_url=ENV_BASE_URL).sync() as env:
         result = env.reset()
         obs = result.observation
 
@@ -51,7 +63,7 @@ def main():
             obs = result.observation
 
             print(
-                f"[STEP] step={step+1} "
+                f"[STEP] step={step + 1} "
                 f"action={action_name} "
                 f"reward={result.reward:.3f}"
             )
