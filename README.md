@@ -142,7 +142,17 @@ https://codequasar-orbital-anomaly-openenv.hf.space/openapi.json
 uv sync
 ```
 
-## 2) Run server locally
+## 2) Validate OpenEnv structure
+```bash
+openenv validate
+```
+
+Expected output:
+```text
+Validation passed
+```
+
+## 3) Run server locally
 ```bash
 uv run server
 ```
@@ -211,11 +221,11 @@ Hugging Face automatically rebuilds the Docker Space.
 ```text
 orbital-anomaly-openenv/
 ├── inference.py
+├── openenv.yaml
 ├── Dockerfile
 ├── README.md
 ├── pyproject.toml
 ├── uv.lock
-├── openenv.yaml
 └── orbital_anomaly_openenv/
     ├── __init__.py
     ├── client.py
@@ -255,12 +265,8 @@ Before submission run:
 
 ```bash
 openenv validate
-```
-
-and:
-
-```bash
 docker build .
+py inference.py
 ```
 
 Also verify:
@@ -271,4 +277,4 @@ POST /step → 200
 GET /state → 200
 ```
 
-This matches the official validation flow.
+This matches the validation flow.
