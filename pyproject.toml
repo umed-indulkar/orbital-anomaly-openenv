@@ -35,11 +35,11 @@ dev = [
 ]
 
 [project.scripts]
-# Server entry point - enables running via: uv run --project . server
-# or: python -m orbital_anomaly_openenv.server.app
 server = "orbital_anomaly_openenv.server.app:main"
 
 [tool.setuptools]
 include-package-data = true
-packages = ["orbital_anomaly_openenv", "orbital_anomaly_openenv.server"]
-package-dir = { "orbital_anomaly_openenv" = ".", "orbital_anomaly_openenv.server" = "server" }
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["orbital_anomaly_openenv*"]
