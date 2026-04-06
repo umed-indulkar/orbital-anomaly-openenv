@@ -9,7 +9,8 @@ from openenv.core import EnvClient
 from openenv.core.client_types import StepResult
 from openenv.core.env_server.types import State
 
-from .models import (
+# ✅ Flat root import
+from models import (
     OrbitalAnomalyOpenenvAction,
     OrbitalAnomalyOpenenvObservation,
 )
@@ -41,8 +42,8 @@ class OrbitalAnomalyOpenenvEnv(
             safe_mode=obs_data.get("safe_mode", False),
             task_id=obs_data.get("task_id", "easy"),
             mission_status=obs_data.get("mission_status", "stable"),
-            done=payload.get("done", False),
             reward=payload.get("reward"),
+            done=payload.get("done", False),
             metadata=obs_data.get("metadata", {}),
         )
 

@@ -1,20 +1,20 @@
 import os
 from openai import OpenAI
 
-from orbital_anomaly_openenv.client import OrbitalAnomalyOpenenvEnv
-from orbital_anomaly_openenv.models import OrbitalAnomalyOpenenvAction
+from client import OrbitalAnomalyOpenenvEnv
+from models import OrbitalAnomalyOpenenvAction
 
 
-# LLM router (required by checklist)
+# Required LLM router initialization for checklist compliance
 API_BASE_URL = os.getenv(
     "API_BASE_URL",
-    "https://router.huggingface.co/v1"
+    "https://router.huggingface.co/v1",
 )
 
-# Your deployed OpenEnv Space
+# Your deployed OpenEnv environment
 ENV_BASE_URL = os.getenv(
     "ENV_BASE_URL",
-    "https://codequasar-orbital-anomaly-openenv.hf.space"
+    "https://codequasar-orbital-anomaly-openenv.hf.space",
 )
 
 MODEL_NAME = os.getenv("MODEL_NAME", "openai/gpt-4o-mini")
@@ -22,28 +22,31 @@ HF_TOKEN = os.getenv("HF_TOKEN")
 LOCAL_IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME")
 
 
-# Required OpenAI client initialization
+# Required client initialization
 client = OpenAI(
     base_url=API_BASE_URL,
-    api_key=HF_TOKEN
+    api_key=HF_TOKEN or "dummy-key",
 )
 
 
 def choose_action(obs):
-    if obs.solar_efficiency < 0.75:
-        return "rotate_to_sun"
+    """
+    Deterministic heuristic baseline policy.
+    """
+    if obs.mission_status == "critical":
+        return "enter_safe_mode"
 
     if obs.thermal_temp > 75 and obs.payload_on:
         return "disable_payload"
+
+    if obs.solar_efficiency < 0.75:
+        return "rotate_to_sun"
 
     if obs.comms_signal < 0.75:
         return "reboot_comms"
 
     if obs.battery_level < 40:
         return "switch_power_bus"
-
-    if obs.mission_status == "critical":
-        return "enter_safe_mode"
 
     return "noop"
 
@@ -65,6 +68,7 @@ def main():
 
             print(
                 f"[STEP] step={step + 1} "
+                f"task={obs.task_id} "
                 f"action={action_name} "
                 f"reward={result.reward:.3f}"
             )

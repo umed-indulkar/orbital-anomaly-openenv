@@ -4,10 +4,13 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Orbital Anomaly Openenv Environment."""
+"""Orbital Anomaly OpenEnv flat-root module exports."""
 
-from .client import OrbitalAnomalyOpenenvEnv
-from .models import OrbitalAnomalyOpenenvAction, OrbitalAnomalyOpenenvObservation
+from client import OrbitalAnomalyOpenenvEnv
+from models import (
+    OrbitalAnomalyOpenenvAction,
+    OrbitalAnomalyOpenenvObservation,
+)
 
 __all__ = [
     "OrbitalAnomalyOpenenvAction",

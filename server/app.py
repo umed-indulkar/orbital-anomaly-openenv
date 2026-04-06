@@ -5,40 +5,42 @@
 # LICENSE file in the root directory of this source tree.
 
 """
-FastAPI application for the Orbital Anomaly Openenv Environment.
+FastAPI application for the Orbital Anomaly OpenEnv Environment.
 
-This module creates an HTTP server that exposes the OrbitalAnomalyOpenenvEnvironment
-over HTTP and WebSocket endpoints, compatible with EnvClient.
+This module exposes the Orbital Anomaly simulator over HTTP and WebSocket
+endpoints using OpenEnv's standard server interface.
 """
+
+from fastapi.responses import HTMLResponse
 
 try:
     from openenv.core.env_server.http_server import create_app
 except Exception as e:  # pragma: no cover
     raise ImportError(
-        "openenv is required for the web interface. Install dependencies with '\n    uv sync\n'"
+        "openenv is required for the web interface. Install dependencies with:\n    uv sync"
     ) from e
 
-from fastapi.responses import HTMLResponse
 
-try:
-    from ..models import OrbitalAnomalyOpenenvAction, OrbitalAnomalyOpenenvObservation
-    from .orbital_anomaly_openenv_environment import OrbitalAnomalyOpenenvEnvironment
-except ModuleNotFoundError:
-    from models import OrbitalAnomalyOpenenvAction, OrbitalAnomalyOpenenvObservation
-    from server.orbital_anomaly_openenv_environment import OrbitalAnomalyOpenenvEnvironment
+# ✅ Flat root imports (final structure)
+from models import (
+    OrbitalAnomalyOpenenvAction,
+    OrbitalAnomalyOpenenvObservation,
+)
+from server.orbital_anomaly_openenv_environment import (
+    OrbitalAnomalyOpenenvEnvironment,
+)
 
 
-# Create OpenEnv FastAPI app
+# OpenEnv FastAPI app
 app = create_app(
     OrbitalAnomalyOpenenvEnvironment,
     OrbitalAnomalyOpenenvAction,
     OrbitalAnomalyOpenenvObservation,
     env_name="orbital_anomaly_openenv",
-    max_concurrent_envs=1,
+    max_concurrent_envs=4,
 )
 
 
-# Premium landing UI for Hugging Face Space App tab
 @app.get("/", response_class=HTMLResponse)
 def home():
     return """
@@ -58,8 +60,8 @@ def home():
                 min-height: 100vh;
             }
             .card {
-                width: 850px;
-                max-width: 90%;
+                width: 900px;
+                max-width: 92%;
                 background: rgba(255,255,255,0.06);
                 border: 1px solid rgba(255,255,255,0.12);
                 border-radius: 20px;
@@ -68,11 +70,11 @@ def home():
             }
             h1 {
                 margin-top: 0;
-                font-size: 44px;
+                font-size: 42px;
             }
             p {
                 color: #cbd5e1;
-                line-height: 1.6;
+                line-height: 1.7;
                 font-size: 18px;
             }
             .grid {
@@ -107,9 +109,9 @@ def home():
         <div class="card">
             <h1>🛰️ Orbital Anomaly OpenEnv</h1>
             <p>
-                A mission-control simulator for diagnosing cascading satellite subsystem anomalies
-                and applying multi-step recovery strategies across power, thermal, communication,
-                and payload systems.
+                A mission-control benchmark for diagnosing cascading spacecraft
+                subsystem failures and applying multi-step recovery policies
+                across power, thermal, communication, and payload systems.
             </p>
 
             <div class="grid">

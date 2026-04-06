@@ -8,7 +8,7 @@
 Orbital Satellite Anomaly Response Environment.
 
 A realistic spacecraft operations simulator where the agent must diagnose
-telemetry anomalies and apply mission control actions to stabilize the satellite.
+telemetry anomalies and apply mission-control actions to stabilize the satellite.
 """
 
 from uuid import uuid4
@@ -16,16 +16,11 @@ from uuid import uuid4
 from openenv.core.env_server.interfaces import Environment
 from openenv.core.env_server.types import State
 
-try:
-    from ..models import (
-        OrbitalAnomalyOpenenvAction,
-        OrbitalAnomalyOpenenvObservation,
-    )
-except ImportError:
-    from models import (
-        OrbitalAnomalyOpenenvAction,
-        OrbitalAnomalyOpenenvObservation,
-    )
+# ✅ Flat root import for final repo structure
+from models import (
+    OrbitalAnomalyOpenenvAction,
+    OrbitalAnomalyOpenenvObservation,
+)
 
 
 class OrbitalAnomalyOpenenvEnvironment(Environment):
@@ -33,7 +28,7 @@ class OrbitalAnomalyOpenenvEnvironment(Environment):
     Satellite anomaly response simulator.
 
     The agent acts as mission control and must stabilize battery,
-    thermal, and communications telemetry.
+    thermal, communication, and payload systems.
     """
 
     SUPPORTS_CONCURRENT_SESSIONS: bool = True
@@ -52,8 +47,10 @@ class OrbitalAnomalyOpenenvEnvironment(Environment):
 
     def reset(self) -> OrbitalAnomalyOpenenvObservation:
         """
-        Reset into a deterministic anomaly scenario.
-        Cycles through easy → medium → hard.
+        Reset into a deterministic benchmark task.
+
+        Cycles through:
+        easy → medium → hard
         """
         self._state = State(episode_id=str(uuid4()), step_count=0)
 
@@ -91,7 +88,7 @@ class OrbitalAnomalyOpenenvEnvironment(Environment):
         self, action: OrbitalAnomalyOpenenvAction
     ) -> OrbitalAnomalyOpenenvObservation:  # type: ignore[override]
         """
-        Execute a mission control action.
+        Execute one mission-control action.
         """
         self._state.step_count += 1
 
@@ -121,38 +118,45 @@ class OrbitalAnomalyOpenenvEnvironment(Environment):
             self.safe_mode = True
             self.payload_on = False
             self.thermal_temp -= 6
-            self.comms_signal = min(1.0, self.comms_signal + 0.1)
+            self.comms_signal = min(1.0, self.comms_signal + 0.10)
 
         elif action_type == "switch_power_bus":
             self.battery_level = min(100.0, self.battery_level + 8)
 
     def _physics_update(self):
         """
-        Hidden subsystem evolution.
+        Hidden subsystem evolution after each action.
         """
+        # Solar charging
         self.battery_level += self.solar_efficiency * 5
+
+        # Base bus load
         self.battery_level -= 3
 
+        # Payload thermal and power impact
         if self.payload_on:
             self.thermal_temp += 4
             self.battery_level -= 2
         else:
             self.thermal_temp -= 2
 
+        # Overheating damages communications
         if self.thermal_temp > 85:
             self.comms_signal -= 0.08
 
+        # Safe mode gradually stabilizes
         if self.safe_mode:
             self.thermal_temp -= 1
             self.comms_signal += 0.03
 
+        # Clamp ranges
         self.battery_level = max(0.0, min(100.0, self.battery_level))
         self.thermal_temp = max(0.0, min(120.0, self.thermal_temp))
         self.comms_signal = max(0.0, min(1.0, self.comms_signal))
 
     def _compute_reward(self) -> float:
         """
-        Dense reward strictly in 0–1 range.
+        Dense reward strictly in [0, 1].
         """
         battery_score = self.battery_level / 100
         thermal_score = max(0.0, 1 - self.thermal_temp / 100)

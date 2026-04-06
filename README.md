@@ -59,12 +59,12 @@ This makes it ideal for:
 
 The agent can issue one of the following mission-control actions:
 
-- `rotate_to_sun` → improves solar charging efficiency
-- `disable_payload` → reduces thermal + battery load
-- `reboot_comms` → restores communications
-- `enter_safe_mode` → emergency stabilization action
-- `switch_power_bus` → boosts battery reserves
-- `noop` → no intervention
+- `rotate_to_sun`
+- `disable_payload`
+- `reboot_comms`
+- `enter_safe_mode`
+- `switch_power_bus`
+- `noop`
 
 ---
 
@@ -72,16 +72,16 @@ The agent can issue one of the following mission-control actions:
 
 Each step returns spacecraft telemetry:
 
-- `battery_level` → 0–100
-- `solar_efficiency` → 0–1
-- `thermal_temp` → Celsius
-- `comms_signal` → 0–1
-- `payload_on` → bool
-- `safe_mode` → bool
-- `task_id` → easy / medium / hard
-- `mission_status` → stable / warning / critical
-- `reward` → dense 0–1 progress signal
-- `done` → episode termination
+- `battery_level`
+- `solar_efficiency`
+- `thermal_temp`
+- `comms_signal`
+- `payload_on`
+- `safe_mode`
+- `task_id`
+- `mission_status`
+- `reward`
+- `done`
 
 ---
 
@@ -89,14 +89,9 @@ Each step returns spacecraft telemetry:
 
 The environment contains **3 deterministic benchmark tasks**:
 
-## 🟢 Easy
-Low battery + solar misalignment
-
-## 🟡 Medium
-Thermal overload + moderate power degradation
-
-## 🔴 Hard
-Simultaneous battery, thermal, and communication collapse
+- 🟢 Easy → battery + solar anomaly
+- 🟡 Medium → thermal overload
+- 🔴 Hard → cascading subsystem failure
 
 This satisfies the **minimum 3-task grader requirement**.
 
@@ -104,7 +99,7 @@ This satisfies the **minimum 3-task grader requirement**.
 
 # 🏆 Reward Design
 
-The reward is a **dense trajectory signal in the range 0.0–1.0**.
+The reward is a **dense trajectory signal in the range [0, 1]**.
 
 It combines:
 - battery health
@@ -112,13 +107,11 @@ It combines:
 - communication quality
 - mission survivability
 
-This provides:
+This enables:
 - partial progress shaping
-- long-horizon planning incentives
-- smooth optimization signal
-- deterministic grading
-
-Exactly aligned with OpenEnv scoring requirements.
+- long-horizon optimization
+- deterministic evaluation
+- smooth policy learning
 
 ---
 
@@ -142,22 +135,17 @@ https://codequasar-orbital-anomaly-openenv.hf.space/openapi.json
 uv sync
 ```
 
-## 2) Validate OpenEnv structure
+## 2) Validate structure
 ```bash
 openenv validate
 ```
 
-Expected output:
-```text
-Validation passed
-```
-
-## 3) Run server locally
+## 3) Run locally
 ```bash
 uv run server
 ```
 
-Server starts at:
+Server:
 ```text
 http://localhost:8000
 ```
@@ -169,50 +157,40 @@ http://localhost:8000/docs
 
 ---
 
-# 🧪 Run Baseline Inference
-
-The repository includes a **reproducible heuristic baseline agent**.
+# 🧪 Baseline Inference
 
 Run:
 ```bash
 py inference.py
 ```
 
-Expected output:
+Expected:
 ```text
 [START] orbital anomaly recovery baseline
-[STEP] step=1 action=rotate_to_sun reward=0.610
+[STEP] step=1 task=easy action=rotate_to_sun reward=0.610
 ...
-[END] final_reward=0.647
+[END] final_reward=0.720
 ```
-
-This satisfies the mandatory **baseline reproducibility and repo-root inference requirement**.
 
 ---
 
 # 🐳 Docker Build
 
-Build locally:
 ```bash
 docker build -t orbital-anomaly-openenv .
-```
-
-Run:
-```bash
 docker run -p 8000:8000 orbital-anomaly-openenv
 ```
 
 ---
 
-# ☁️ Deploy to Hugging Face Spaces
+# ☁️ Hugging Face Deployment
 
-Push latest repo:
 ```bash
 git push origin main
 git push hf main
 ```
 
-Hugging Face automatically rebuilds the Docker Space.
+HF automatically rebuilds the Docker Space.
 
 ---
 
@@ -220,48 +198,47 @@ Hugging Face automatically rebuilds the Docker Space.
 
 ```text
 orbital-anomaly-openenv/
+├── __init__.py
+├── client.py
+├── models.py
 ├── inference.py
 ├── openenv.yaml
 ├── Dockerfile
 ├── README.md
 ├── pyproject.toml
 ├── uv.lock
-└── orbital_anomaly_openenv/
+└── server/
     ├── __init__.py
-    ├── client.py
-    ├── models.py
-    └── server/
-        ├── __init__.py
-        ├── app.py
-        └── orbital_anomaly_openenv_environment.py
+    ├── app.py
+    └── orbital_anomaly_openenv_environment.py
 ```
 
 ---
 
 # 🧠 Why This Benchmark Matters
 
-Most existing OpenEnv tasks focus on:
-- browser actions
-- text manipulation
+Most OpenEnv tasks focus on:
+- browser automation
 - scheduling
-- tool usage
+- text tools
+- web actions
 
-This benchmark introduces a **spacecraft anomaly response domain**, which is:
+This benchmark introduces a **causal spacecraft recovery domain** that is:
 
 - safety critical
 - long horizon
-- partially observable
 - reward dense
-- causally rich
+- partially observable
 - highly novel
+- real-world aligned
 
-This strongly improves **novelty + real-world utility scores**.
+This improves both **novelty and utility scores**.
 
 ---
 
 # ✅ Validation Checklist
 
-Before submission run:
+Run before submission:
 
 ```bash
 openenv validate
@@ -276,5 +253,3 @@ POST /reset → 200
 POST /step → 200
 GET /state → 200
 ```
-
-This matches the validation flow.

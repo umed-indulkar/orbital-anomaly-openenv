@@ -1,7 +1,6 @@
 spec_version: 1
 name: orbital_anomaly_openenv
 type: space
-runtime: fastapi
+runtime: docker
 app: server.app:app
 port: 8000
-
