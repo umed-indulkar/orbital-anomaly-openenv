@@ -7,21 +7,76 @@
 """
 Data models for the Orbital Anomaly Openenv Environment.
 
-The orbital_anomaly_openenv environment is a simple test environment that echoes back messages.
+This environment simulates real-world spacecraft anomaly response tasks.
+The agent receives spacecraft telemetry and must take corrective actions
+to stabilize the mission.
 """
 
+from typing import Literal
 from openenv.core.env_server.types import Action, Observation
 from pydantic import Field
 
 
 class OrbitalAnomalyOpenenvAction(Action):
-    """Action for the Orbital Anomaly Openenv environment - just a message to echo."""
+    """
+    Action model for spacecraft anomaly response.
+    Represents mission control commands sent to the spacecraft.
+    """
 
-    message: str = Field(..., description="Message to echo back")
+    action_type: Literal[
+        "rotate_to_sun",
+        "disable_payload",
+        "reboot_comms",
+        "enter_safe_mode",
+        "switch_power_bus",
+        "noop",
+    ] = Field(
+        ...,
+        description="Mission control corrective action to apply",
+    )
 
 
 class OrbitalAnomalyOpenenvObservation(Observation):
-    """Observation from the Orbital Anomaly Openenv environment - the echoed message."""
+    """
+    Telemetry observation returned from the spacecraft simulator.
+    """
 
-    echoed_message: str = Field(default="", description="The echoed message")
-    message_length: int = Field(default=0, description="Length of the echoed message")
+    battery_level: float = Field(
+        default=100.0,
+        description="Current spacecraft battery percentage (0-100)",
+    )
+
+    solar_efficiency: float = Field(
+        default=1.0,
+        description="Solar charging efficiency (0-1)",
+    )
+
+    thermal_temp: float = Field(
+        default=40.0,
+        description="Payload thermal temperature in Celsius",
+    )
+
+    comms_signal: float = Field(
+        default=1.0,
+        description="Communication signal strength (0-1)",
+    )
+
+    payload_on: bool = Field(
+        default=True,
+        description="Whether science payload is currently active",
+    )
+
+    safe_mode: bool = Field(
+        default=False,
+        description="Whether spacecraft is in safe mode",
+    )
+
+    task_id: str = Field(
+        default="easy",
+        description="Current anomaly scenario difficulty",
+    )
+
+    mission_status: str = Field(
+        default="stable",
+        description="Overall mission condition: stable / warning / critical",
+    )

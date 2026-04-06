@@ -1,10 +1,7 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # All rights reserved.
-#
-# This source code is licensed under the BSD-style license found in the
-# LICENSE file in the root directory of this source tree.
 
-"""Orbital Anomaly Openenv Environment Client."""
+"""Orbital Satellite Anomaly Response Client."""
 
 from typing import Dict
 
@@ -12,66 +9,38 @@ from openenv.core import EnvClient
 from openenv.core.client_types import StepResult
 from openenv.core.env_server.types import State
 
-from .models import OrbitalAnomalyOpenenvAction, OrbitalAnomalyOpenenvObservation
+from .models import (
+    OrbitalAnomalyOpenenvAction,
+    OrbitalAnomalyOpenenvObservation,
+)
 
 
 class OrbitalAnomalyOpenenvEnv(
     EnvClient[OrbitalAnomalyOpenenvAction, OrbitalAnomalyOpenenvObservation, State]
 ):
     """
-    Client for the Orbital Anomaly Openenv Environment.
-
-    This client maintains a persistent WebSocket connection to the environment server,
-    enabling efficient multi-step interactions with lower latency.
-    Each client instance has its own dedicated environment session on the server.
-
-    Example:
-        >>> # Connect to a running server
-        >>> with OrbitalAnomalyOpenenvEnv(base_url="http://localhost:8000") as client:
-        ...     result = client.reset()
-        ...     print(result.observation.echoed_message)
-        ...
-        ...     result = client.step(OrbitalAnomalyOpenenvAction(message="Hello!"))
-        ...     print(result.observation.echoed_message)
-
-    Example with Docker:
-        >>> # Automatically start container and connect
-        >>> client = OrbitalAnomalyOpenenvEnv.from_docker_image("orbital_anomaly_openenv-env:latest")
-        >>> try:
-        ...     result = client.reset()
-        ...     result = client.step(OrbitalAnomalyOpenenvAction(message="Test"))
-        ... finally:
-        ...     client.close()
+    Typed client for the satellite anomaly response environment.
     """
 
     def _step_payload(self, action: OrbitalAnomalyOpenenvAction) -> Dict:
-        """
-        Convert OrbitalAnomalyOpenenvAction to JSON payload for step message.
-
-        Args:
-            action: OrbitalAnomalyOpenenvAction instance
-
-        Returns:
-            Dictionary representation suitable for JSON encoding
-        """
         return {
-            "message": action.message,
+            "action_type": action.action_type,
         }
 
-    def _parse_result(self, payload: Dict) -> StepResult[OrbitalAnomalyOpenenvObservation]:
-        """
-        Parse server response into StepResult[OrbitalAnomalyOpenenvObservation].
-
-        Args:
-            payload: JSON response data from server
-
-        Returns:
-            StepResult with OrbitalAnomalyOpenenvObservation
-        """
+    def _parse_result(
+        self, payload: Dict
+    ) -> StepResult[OrbitalAnomalyOpenenvObservation]:
         obs_data = payload.get("observation", {})
+
         observation = OrbitalAnomalyOpenenvObservation(
-            echoed_message=obs_data.get("echoed_message", ""),
-            message_length=obs_data.get("message_length", 0),
+            battery_level=obs_data.get("battery_level", 0.0),
+            solar_efficiency=obs_data.get("solar_efficiency", 0.0),
+            thermal_temp=obs_data.get("thermal_temp", 0.0),
+            comms_signal=obs_data.get("comms_signal", 0.0),
+            payload_on=obs_data.get("payload_on", False),
+            safe_mode=obs_data.get("safe_mode", False),
+            task_id=obs_data.get("task_id", "easy"),
+            mission_status=obs_data.get("mission_status", "stable"),
             done=payload.get("done", False),
             reward=payload.get("reward"),
             metadata=obs_data.get("metadata", {}),
@@ -84,15 +53,6 @@ class OrbitalAnomalyOpenenvEnv(
         )
 
     def _parse_state(self, payload: Dict) -> State:
-        """
-        Parse server response into State object.
-
-        Args:
-            payload: JSON response from state request
-
-        Returns:
-            State object with episode_id and step_count
-        """
         return State(
             episode_id=payload.get("episode_id"),
             step_count=payload.get("step_count", 0),
