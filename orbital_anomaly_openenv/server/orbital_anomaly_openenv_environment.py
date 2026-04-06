@@ -11,7 +11,6 @@ A realistic spacecraft operations simulator where the agent must diagnose
 telemetry anomalies and apply mission control actions to stabilize the satellite.
 """
 
-import random
 from uuid import uuid4
 
 from openenv.core.env_server.interfaces import Environment
@@ -41,6 +40,7 @@ class OrbitalAnomalyOpenenvEnvironment(Environment):
 
     def __init__(self):
         self._state = State(episode_id=str(uuid4()), step_count=0)
+        self._reset_count = 0
         self.task_id = "easy"
 
         self.battery_level = 100.0
@@ -52,11 +52,14 @@ class OrbitalAnomalyOpenenvEnvironment(Environment):
 
     def reset(self) -> OrbitalAnomalyOpenenvObservation:
         """
-        Reset into a new anomaly scenario.
+        Reset into a deterministic anomaly scenario.
+        Cycles through easy → medium → hard.
         """
         self._state = State(episode_id=str(uuid4()), step_count=0)
 
-        self.task_id = random.choice(["easy", "medium", "hard"])
+        task_cycle = ["easy", "medium", "hard"]
+        self.task_id = task_cycle[self._reset_count % 3]
+        self._reset_count += 1
 
         if self.task_id == "easy":
             self.battery_level = 42.0
@@ -75,9 +78,9 @@ class OrbitalAnomalyOpenenvEnvironment(Environment):
             self.safe_mode = False
 
         else:  # hard
-            self.battery_level = 35.0
-            self.solar_efficiency = 0.15
-            self.thermal_temp = 90.0
+            self.battery_level = 30.0
+            self.solar_efficiency = 0.20
+            self.thermal_temp = 92.0
             self.comms_signal = 0.55
             self.payload_on = True
             self.safe_mode = False
@@ -127,41 +130,38 @@ class OrbitalAnomalyOpenenvEnvironment(Environment):
         """
         Hidden subsystem evolution.
         """
-        # Base spacecraft load
         self.battery_level += self.solar_efficiency * 5
         self.battery_level -= 3
 
-        # Payload creates thermal + power load
         if self.payload_on:
             self.thermal_temp += 4
             self.battery_level -= 2
         else:
             self.thermal_temp -= 2
 
-        # Thermal damage affects communications
         if self.thermal_temp > 85:
             self.comms_signal -= 0.08
 
-        # Safe mode slowly improves stability
         if self.safe_mode:
             self.thermal_temp -= 1
             self.comms_signal += 0.03
 
-        # Clamp ranges
         self.battery_level = max(0.0, min(100.0, self.battery_level))
         self.thermal_temp = max(0.0, min(120.0, self.thermal_temp))
         self.comms_signal = max(0.0, min(1.0, self.comms_signal))
 
     def _compute_reward(self) -> float:
         """
-        Dense reward in 0–1 range.
+        Dense reward strictly in 0–1 range.
         """
         battery_score = self.battery_level / 100
         thermal_score = max(0.0, 1 - self.thermal_temp / 100)
         comms_score = self.comms_signal
 
         reward = (battery_score + thermal_score + comms_score) / 3
-        return round(max(0.0, min(1.0, reward)), 3)
+        reward = max(0.0, min(1.0, reward))
+
+        return round(reward, 3)
 
     def _mission_status(self) -> str:
         """

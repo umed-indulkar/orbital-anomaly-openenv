@@ -5,21 +5,16 @@ from .client import OrbitalAnomalyOpenenvEnv
 from .models import OrbitalAnomalyOpenenvAction
 
 
-# Required environment variables
 API_BASE_URL = os.getenv(
     "API_BASE_URL",
     "https://codequasar-orbital-anomaly-openenv.hf.space"
 )
 MODEL_NAME = os.getenv("MODEL_NAME", "gpt-4o-mini")
 HF_TOKEN = os.getenv("HF_TOKEN")
-
-# Optional if using local docker image
 LOCAL_IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME")
 
-
-# Required OpenAI client configuration
 client = OpenAI(
-    base_url="https://router.huggingface.co/v1",
+    base_url=API_BASE_URL,
     api_key=HF_TOKEN
 )
 
@@ -41,7 +36,7 @@ def choose_action(obs):
 
 
 def main():
-    print("START")
+    print("[START] orbital anomaly recovery baseline")
 
     with OrbitalAnomalyOpenenvEnv(base_url=API_BASE_URL).sync() as env:
         result = env.reset()
@@ -55,12 +50,16 @@ def main():
             )
             obs = result.observation
 
-            print(f"STEP {step + 1}: {action_name}")
+            print(
+                f"[STEP] step={step+1} "
+                f"action={action_name} "
+                f"reward={result.reward:.3f}"
+            )
 
             if result.done:
                 break
 
-        print(f"END reward={result.reward}")
+        print(f"[END] final_reward={result.reward:.3f}")
 
 
 if __name__ == "__main__":

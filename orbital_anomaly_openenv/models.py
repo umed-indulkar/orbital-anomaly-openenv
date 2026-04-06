@@ -1,16 +1,5 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # All rights reserved.
-#
-# This source code is licensed under the BSD-style license found in the
-# LICENSE file in the root directory of this source tree.
-
-"""
-Data models for the Orbital Anomaly Openenv Environment.
-
-This environment simulates real-world spacecraft anomaly response tasks.
-The agent receives spacecraft telemetry and must take corrective actions
-to stabilize the mission.
-"""
 
 from typing import Literal
 from openenv.core.env_server.types import Action, Observation
@@ -20,7 +9,6 @@ from pydantic import Field
 class OrbitalAnomalyOpenenvAction(Action):
     """
     Action model for spacecraft anomaly response.
-    Represents mission control commands sent to the spacecraft.
     """
 
     action_type: Literal[
@@ -38,7 +26,7 @@ class OrbitalAnomalyOpenenvAction(Action):
 
 class OrbitalAnomalyOpenenvObservation(Observation):
     """
-    Telemetry observation returned from the spacecraft simulator.
+    Telemetry observation returned from spacecraft simulator.
     """
 
     battery_level: float = Field(
@@ -63,7 +51,7 @@ class OrbitalAnomalyOpenenvObservation(Observation):
 
     payload_on: bool = Field(
         default=True,
-        description="Whether science payload is currently active",
+        description="Whether science payload is active",
     )
 
     safe_mode: bool = Field(
@@ -71,12 +59,12 @@ class OrbitalAnomalyOpenenvObservation(Observation):
         description="Whether spacecraft is in safe mode",
     )
 
-    task_id: str = Field(
+    task_id: Literal["easy", "medium", "hard"] = Field(
         default="easy",
         description="Current anomaly scenario difficulty",
     )
 
-    mission_status: str = Field(
+    mission_status: Literal["stable", "warning", "critical"] = Field(
         default="stable",
-        description="Overall mission condition: stable / warning / critical",
+        description="Overall mission condition",
     )
