@@ -46,9 +46,7 @@ class OrbitalAnomalyOpenenvEnvironment(Environment):
 
     def reset(self) -> OrbitalAnomalyOpenenvObservation:
         """
-        Reset into a deterministic benchmark task.
-
-        Cycles through:
+        Reset into deterministic benchmark tasks:
         easy → medium → hard
         """
         self._state = State(episode_id=str(uuid4()), step_count=0)
@@ -81,7 +79,7 @@ class OrbitalAnomalyOpenenvEnvironment(Environment):
             self.payload_on = True
             self.safe_mode = False
 
-        return self._get_observation(reward=0.0, done=False)
+        return self._get_observation(reward=0.001, done=False)
 
     def step(
         self, action: OrbitalAnomalyOpenenvAction
@@ -95,14 +93,17 @@ class OrbitalAnomalyOpenenvEnvironment(Environment):
         self._physics_update()
 
         reward = self._compute_reward()
-        done = reward >= 0.92 or self._state.step_count >= 12
+
+        # done based on healthy mission, NOT exact reward edge
+        done = (
+            self.battery_level >= 70
+            and self.thermal_temp <= 60
+            and self.comms_signal >= 0.90
+        ) or self._state.step_count >= 12
 
         return self._get_observation(reward=reward, done=done)
 
     def _apply_action(self, action_type: str):
-        """
-        Apply spacecraft corrective action.
-        """
         if action_type == "rotate_to_sun":
             self.solar_efficiency = min(1.0, self.solar_efficiency + 0.35)
 
@@ -148,21 +149,21 @@ class OrbitalAnomalyOpenenvEnvironment(Environment):
 
     def _compute_reward(self) -> float:
         """
-        Dense reward strictly inside (0,1) for Phase 2.
+        Dense reward strictly in OPEN interval (0,1).
         """
-        battery_score = self.battery_level / 100
-        thermal_score = max(0.0, 1 - self.thermal_temp / 100)
+        battery_score = self.battery_level / 100.0
+        thermal_score = max(0.0, 1 - self.thermal_temp / 100.0)
         comms_score = self.comms_signal
 
-        raw_reward = (battery_score + thermal_score + comms_score) / 3
-        reward = max(0.001, min(0.999, raw_reward))
+        raw_reward = (battery_score + thermal_score + comms_score) / 3.0
+
+        # STRICTLY OPEN interval for grader
+        epsilon = 0.001
+        reward = epsilon + raw_reward * (1 - 2 * epsilon)
 
         return round(reward, 3)
 
     def _mission_status(self) -> str:
-        """
-        Human-readable mission health.
-        """
         if self.battery_level < 25 or self.thermal_temp > 95:
             return "critical"
         if self.battery_level < 45 or self.thermal_temp > 80:
@@ -172,9 +173,6 @@ class OrbitalAnomalyOpenenvEnvironment(Environment):
     def _get_observation(
         self, reward: float, done: bool
     ) -> OrbitalAnomalyOpenenvObservation:
-        """
-        Build typed telemetry observation.
-        """
         return OrbitalAnomalyOpenenvObservation(
             battery_level=self.battery_level,
             solar_efficiency=self.solar_efficiency,
