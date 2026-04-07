@@ -16,7 +16,6 @@ from uuid import uuid4
 from openenv.core.env_server.interfaces import Environment
 from openenv.core.env_server.types import State
 
-# ✅ Flat root import for final repo structure
 from models import (
     OrbitalAnomalyOpenenvAction,
     OrbitalAnomalyOpenenvObservation,
@@ -82,11 +81,11 @@ class OrbitalAnomalyOpenenvEnvironment(Environment):
             self.payload_on = True
             self.safe_mode = False
 
-        return self._get_observation(reward=0.001, done=False)
+        return self._get_observation(reward=0.0, done=False)
 
     def step(
         self, action: OrbitalAnomalyOpenenvAction
-    ) -> OrbitalAnomalyOpenenvObservation:  # type: ignore[override]
+    ) -> OrbitalAnomalyOpenenvObservation:
         """
         Execute one mission-control action.
         """
@@ -127,48 +126,38 @@ class OrbitalAnomalyOpenenvEnvironment(Environment):
         """
         Hidden subsystem evolution after each action.
         """
-        # Solar charging
         self.battery_level += self.solar_efficiency * 5
-
-        # Base bus load
         self.battery_level -= 3
 
-        # Payload thermal and power impact
         if self.payload_on:
             self.thermal_temp += 4
             self.battery_level -= 2
         else:
             self.thermal_temp -= 2
 
-        # Overheating damages communications
         if self.thermal_temp > 85:
             self.comms_signal -= 0.08
 
-        # Safe mode gradually stabilizes
         if self.safe_mode:
             self.thermal_temp -= 1
             self.comms_signal += 0.03
 
-        # Clamp ranges
         self.battery_level = max(0.0, min(100.0, self.battery_level))
         self.thermal_temp = max(0.0, min(120.0, self.thermal_temp))
         self.comms_signal = max(0.0, min(1.0, self.comms_signal))
 
-def _compute_reward(self) -> float:
-    """
-    Dense reward strictly inside (0, 1).
-    Never returns exact 0.0 or 1.0.
-    """
-    battery_score = self.battery_level / 100
-    thermal_score = max(0.0, 1 - self.thermal_temp / 100)
-    comms_score = self.comms_signal
+    def _compute_reward(self) -> float:
+        """
+        Dense reward strictly inside (0,1) for Phase 2.
+        """
+        battery_score = self.battery_level / 100
+        thermal_score = max(0.0, 1 - self.thermal_temp / 100)
+        comms_score = self.comms_signal
 
-    raw_reward = (battery_score + thermal_score + comms_score) / 3
+        raw_reward = (battery_score + thermal_score + comms_score) / 3
+        reward = max(0.001, min(0.999, raw_reward))
 
-    # Force reward strictly in open interval (0, 1)
-    reward = max(0.001, min(0.999, raw_reward))
-
-    return round(reward, 3)
+        return round(reward, 3)
 
     def _mission_status(self) -> str:
         """
