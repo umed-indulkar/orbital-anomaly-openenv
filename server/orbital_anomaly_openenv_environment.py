@@ -82,7 +82,7 @@ class OrbitalAnomalyOpenenvEnvironment(Environment):
             self.payload_on = True
             self.safe_mode = False
 
-        return self._get_observation(reward=0.0, done=False)
+        return self._get_observation(reward=0.001, done=False)
 
     def step(
         self, action: OrbitalAnomalyOpenenvAction
@@ -154,18 +154,21 @@ class OrbitalAnomalyOpenenvEnvironment(Environment):
         self.thermal_temp = max(0.0, min(120.0, self.thermal_temp))
         self.comms_signal = max(0.0, min(1.0, self.comms_signal))
 
-    def _compute_reward(self) -> float:
-        """
-        Dense reward strictly in [0, 1].
-        """
-        battery_score = self.battery_level / 100
-        thermal_score = max(0.0, 1 - self.thermal_temp / 100)
-        comms_score = self.comms_signal
+def _compute_reward(self) -> float:
+    """
+    Dense reward strictly inside (0, 1).
+    Never returns exact 0.0 or 1.0.
+    """
+    battery_score = self.battery_level / 100
+    thermal_score = max(0.0, 1 - self.thermal_temp / 100)
+    comms_score = self.comms_signal
 
-        reward = (battery_score + thermal_score + comms_score) / 3
-        reward = max(0.0, min(1.0, reward))
+    raw_reward = (battery_score + thermal_score + comms_score) / 3
 
-        return round(reward, 3)
+    # Force reward strictly in open interval (0, 1)
+    reward = max(0.001, min(0.999, raw_reward))
+
+    return round(reward, 3)
 
     def _mission_status(self) -> str:
         """
