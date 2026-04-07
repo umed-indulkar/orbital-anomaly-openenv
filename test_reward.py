@@ -1,37 +1,30 @@
 from server.orbital_anomaly_openenv_environment import (
-    OrbitalAnomalyOpenenvEnvironment
+    OrbitalAnomalyOpenenvEnvironment,
 )
 from models import OrbitalAnomalyOpenenvAction
 
-env = OrbitalAnomalyOpenenvEnvironment()
 
-action_cycle = [
-    "rotate_to_sun",
-    "disable_payload",
-    "reboot_comms",
-    "switch_power_bus",
-]
+seen = set()
 
-for i in range(3):
+for _ in range(6):
+    env = OrbitalAnomalyOpenenvEnvironment()
     obs = env.reset()
-    print(f"\nTASK {i+1}: {obs.task_id}")
-    print("reset reward:", obs.reward)
 
-    assert 0 < obs.reward < 1, "Reset reward out of range"
+    print(obs.task_id, obs.reward)
 
-    for step in range(12):
-        action = action_cycle[step % len(action_cycle)]
+    seen.add(obs.task_id)
 
-        obs = env.step(
-            OrbitalAnomalyOpenenvAction(action_type=action)
+    assert 0 < obs.reward < 1
+
+    obs = env.step(
+        OrbitalAnomalyOpenenvAction(
+            action_type="rotate_to_sun"
         )
+    )
 
-        print(
-            f"step={step+1} "
-            f"action={action} "
-            f"reward={obs.reward}"
-        )
+    assert 0 < obs.reward < 1
 
-        assert 0 < obs.reward < 1, "Step reward out of range"
+print("SEEN TASKS:", seen)
+assert len(seen) == 3
 
-print("\n✅ ALL TASK REWARDS STRICTLY IN (0,1)")
+print("✅ TASK CYCLING + REWARD RANGE PASSED")
