@@ -1,27 +1,27 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # All rights reserved.
-#
-# This source code is licensed under the BSD-style license found in the
-# LICENSE file in the root directory of this source tree.
 
 """
 FastAPI application for the Orbital Anomaly OpenEnv Environment.
 
-This module exposes the Orbital Anomaly simulator over HTTP and WebSocket
-endpoints using OpenEnv's standard server interface.
+Exposes the simulator over HTTP and WebSocket endpoints via OpenEnv's
+standard server interface.  A custom /reset override passes the optional
+``task_id`` field from the request body directly to the environment so
+that the Phase-2 grader can target specific benchmark tasks by name.
 """
 
-from fastapi.responses import HTMLResponse
+from typing import Optional
+
+from fastapi import Request
+from fastapi.responses import HTMLResponse, JSONResponse
 
 try:
     from openenv.core.env_server.http_server import create_app
-except Exception as e:  # pragma: no cover
+except Exception as e:
     raise ImportError(
-        "openenv is required for the web interface. Install dependencies with:\n    uv sync"
+        "openenv is required. Install with: uv sync"
     ) from e
 
-
-# ✅ Flat root imports (final structure)
 from models import (
     OrbitalAnomalyOpenenvAction,
     OrbitalAnomalyOpenenvObservation,
@@ -30,16 +30,46 @@ from server.orbital_anomaly_openenv_environment import (
     OrbitalAnomalyOpenenvEnvironment,
 )
 
+# ── Build the OpenEnv FastAPI app ─────────────────────────────────────────────
 
-# OpenEnv FastAPI app
 app = create_app(
     OrbitalAnomalyOpenenvEnvironment,
     OrbitalAnomalyOpenenvAction,
     OrbitalAnomalyOpenenvObservation,
     env_name="orbital_anomaly_openenv",
-    max_concurrent_envs=4,
+    max_concurrent_envs=8,
 )
 
+
+# ── Custom /reset that forwards task_id ───────────────────────────────────────
+# We replace the auto-generated reset with one that reads ``task_id`` from
+# the JSON body and passes it to env.reset().  If the body is empty or
+# task_id is omitted the environment cycles tasks deterministically.
+
+@app.post("/reset", include_in_schema=False)
+async def reset_with_task(request: Request) -> JSONResponse:
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+
+    task_id: Optional[str] = body.get("task_id") if isinstance(body, dict) else None
+
+    # Obtain (or create) the shared environment instance from the app state
+    env: OrbitalAnomalyOpenenvEnvironment = request.app.state.env
+
+    obs = env.reset(task_id=task_id)
+
+    return JSONResponse(
+        content={
+            "observation": obs.model_dump(),
+            "reward": obs.reward,
+            "done": obs.done,
+        }
+    )
+
+
+# ── Landing page ──────────────────────────────────────────────────────────────
 
 @app.get("/", response_class=HTMLResponse)
 def home():
@@ -68,15 +98,8 @@ def home():
                 padding: 40px;
                 box-shadow: 0 20px 50px rgba(0,0,0,0.35);
             }
-            h1 {
-                margin-top: 0;
-                font-size: 42px;
-            }
-            p {
-                color: #cbd5e1;
-                line-height: 1.7;
-                font-size: 18px;
-            }
+            h1 { margin-top: 0; font-size: 42px; }
+            p  { color: #cbd5e1; line-height: 1.7; font-size: 18px; }
             .grid {
                 display: grid;
                 grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -94,15 +117,8 @@ def home():
                 transition: 0.2s ease;
                 font-size: 17px;
             }
-            .btn:hover {
-                transform: translateY(-2px);
-                background: rgba(255,255,255,0.14);
-            }
-            .footer {
-                margin-top: 28px;
-                color: #94a3b8;
-                font-size: 14px;
-            }
+            .btn:hover { transform: translateY(-2px); background: rgba(255,255,255,0.14); }
+            .footer { margin-top: 28px; color: #94a3b8; font-size: 14px; }
         </style>
     </head>
     <body>
@@ -113,16 +129,15 @@ def home():
                 subsystem failures and applying multi-step recovery policies
                 across power, thermal, communication, and payload systems.
             </p>
-
             <div class="grid">
                 <a class="btn" href="/docs">📘 Interactive API Docs</a>
                 <a class="btn" href="/schema">🧩 JSON Schema</a>
                 <a class="btn" href="/state">📡 Live Environment State</a>
                 <a class="btn" href="/openapi.json">⚙️ OpenAPI Spec</a>
             </div>
-
             <div class="footer">
-                Built with OpenEnv • FastAPI • Hugging Face Spaces
+                Built with OpenEnv · FastAPI · Hugging Face Spaces
+                | Tasks: easy · medium · hard
             </div>
         </div>
     </body>

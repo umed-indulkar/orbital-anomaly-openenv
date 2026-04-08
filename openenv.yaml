@@ -4,3 +4,26 @@ type: space
 runtime: docker
 app: server.app:app
 port: 8000
+
+tasks:
+  - id: easy
+    description: >
+      Battery depletion and solar misalignment. The agent must realign solar
+      panels and restore battery reserves before the satellite loses power.
+    difficulty: easy
+    max_steps: 12
+
+  - id: medium
+    description: >
+      Thermal overload with moderate battery. The agent must disable the
+      payload and/or enter safe mode to prevent irreversible hardware damage.
+    difficulty: medium
+    max_steps: 12
+
+  - id: hard
+    description: >
+      Cascading multi-subsystem failure — simultaneous low battery, solar
+      misalignment, thermal overload, and degraded communications. The agent
+      must sequence multiple corrective actions under tight resource constraints.
+    difficulty: hard
+    max_steps: 12
