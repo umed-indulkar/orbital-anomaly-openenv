@@ -8,22 +8,32 @@ port: 8000
 tasks:
   - id: easy
     description: >
-      Battery depletion and solar misalignment. The agent must realign solar
-      panels and restore battery reserves before the satellite loses power.
+      ADCS misalignment causes poor solar charging and low battery.
+      A single latent MPPT fault limits charge controller effectiveness.
+      Agent must realign solar panels and restore battery reserves before
+      the satellite enters eclipse. Science observation window is inactive
+      — agent can safely disable payload without mission penalty.
     difficulty: easy
     max_steps: 12
 
   - id: medium
     description: >
-      Thermal overload with moderate battery. The agent must disable the
-      payload and/or enter safe mode to prevent irreversible hardware damage.
+      Thermal overload driven by stuck radiator valve and degrading RF amplifier.
+      Active science observation window creates genuine mission tradeoff — disabling
+      payload immediately improves thermal safety but sacrifices science throughput.
+      Agent must sequence thermal relief against communication restoration while
+      managing battery reserves as orbital context advances.
     difficulty: medium
     max_steps: 12
 
   - id: hard
     description: >
-      Cascading multi-subsystem failure — simultaneous low battery, solar
-      misalignment, thermal overload, and degraded communications. The agent
-      must sequence multiple corrective actions under tight resource constraints.
+      Cascading multi-subsystem failure with 7 simultaneous latent root faults
+      including reaction wheel saturation, gyro drift, star tracker dropout,
+      heat pipe failure, heater relay latch, transponder overheating, and stuck
+      MPPT. Episode starts in eclipse with ground station blackout and radiation
+      zone. Partial observability hides gyro, avionics, uplink margin, and solar
+      current telemetry deterministically. Agent must plan under belief-state
+      uncertainty across EPS, ADCS, thermal, comms, and orbital context simultaneously.
     difficulty: hard
     max_steps: 12
