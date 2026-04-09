@@ -68,8 +68,7 @@ class OrbitalAnomalyOpenenvEnvironment(Environment):
     SUPPORTS_CONCURRENT_SESSIONS: bool = True
 
     # Class-level counter for cycling when no explicit task_id is given.
-    # NOTE: Explicit task_id requests NEVER consume or depend on this counter —
-    # this prevents test/grader interference when calling reset(task_id=...).
+    # Explicit task_id requests NEVER consume or depend on this counter.
     _global_reset_count: int = 0
 
     # ──────────────────────────────────────────────────────────────────
@@ -78,64 +77,65 @@ class OrbitalAnomalyOpenenvEnvironment(Environment):
 
     def __init__(self):
         self._state = State(episode_id=str(uuid4()), step_count=0)
-        # Pending explicit task_id — set before base-class calls reset()
-        self._pending_task_id: str | None = None
         self._init_nominal_state()
 
     def _init_nominal_state(self):
-        """Initialise all subsystem variables to nominal healthy values."""
+        """Initialise all subsystem variables to nominal healthy values.
+        NOTE: task_id is intentionally NOT set here — it is always set
+        explicitly in reset() after this call returns."""
 
         # ── EPS ───────────────────────────────────────────────────────
-        self.battery_soc: float             = 85.0
-        self.bus_voltage: float             = _BUS_NOMINAL
-        self.panel_health: float            = 1.0
-        self.solar_array_current: float     = 4.0
-        self.payload_power_draw: float      = 8.0
-        self.avionics_draw: float           = 3.5
-        self.heater_draw: float             = 0.0
+        self.battery_soc: float              = 85.0
+        self.bus_voltage: float              = _BUS_NOMINAL
+        self.panel_health: float             = 1.0
+        self.solar_array_current: float      = 4.0
+        self.payload_power_draw: float       = 8.0
+        self.avionics_draw: float            = 3.5
+        self.heater_draw: float              = 0.0
         self.charge_controller_health: float = 1.0
-        self.power_bus_redundancy: bool     = True
+        self.power_bus_redundancy: bool      = True
 
         # ── ADCS ──────────────────────────────────────────────────────
-        self.attitude_error_deg: float      = 5.0
-        self.sun_vector_alignment: float    = 0.996
-        self.reaction_wheel_momentum: float = 0.1
-        self.gyro_bias: float               = 0.0
-        self.star_tracker_available: bool   = True
-        self.wheel_saturation_level: float  = 0.1
+        self.attitude_error_deg: float       = 5.0
+        self.sun_vector_alignment: float     = 0.996
+        self.reaction_wheel_momentum: float  = 0.1
+        self.gyro_bias: float                = 0.0
+        self.star_tracker_available: bool    = True
+        self.wheel_saturation_level: float   = 0.1
 
         # ── Thermal (multi-zone) ──────────────────────────────────────
-        self.battery_temp: float            = 15.0
-        self.payload_temp: float            = 25.0
-        self.avionics_temp: float           = 30.0
-        self.radiator_efficiency: float     = 1.0
-        self.heater_state: bool             = False
-        self.thermal_loop_health: float     = 1.0
+        self.battery_temp: float             = 15.0
+        self.payload_temp: float             = 25.0
+        self.avionics_temp: float            = 30.0
+        self.radiator_efficiency: float      = 1.0
+        self.heater_state: bool              = False
+        self.thermal_loop_health: float      = 1.0
 
         # ── Communications ────────────────────────────────────────────
-        self.antenna_pointing_error: float  = 3.0
-        self.transmitter_power: float       = 5.0
-        self.bit_error_rate: float          = 0.001
-        self.uplink_margin: float           = 12.0
-        self.packet_loss_ratio: float       = 0.02
-        self.command_latency_ms: float      = 120.0
+        self.antenna_pointing_error: float   = 3.0
+        self.transmitter_power: float        = 5.0
+        self.bit_error_rate: float           = 0.001
+        self.uplink_margin: float            = 12.0
+        self.packet_loss_ratio: float        = 0.02
+        self.command_latency_ms: float       = 120.0
 
         # ── Orbital context ───────────────────────────────────────────
-        self.sunlit: bool                   = True
-        self.eclipse_timer: int             = 0
-        self.ground_station_visible: bool   = True
-        self.radiation_zone: bool           = False
+        self.sunlit: bool                    = True
+        self.eclipse_timer: int              = 0
+        self.ground_station_visible: bool    = True
+        self.radiation_zone: bool            = False
         self.observation_window_active: bool = False
-        self._orbit_step: int               = 0
+        self._orbit_step: int                = 0
 
         # ── Mission / payload ─────────────────────────────────────────
-        self.payload_on: bool               = True
-        self.safe_mode: bool                = False
-        self.task_id: str                   = "easy"
+        self.payload_on: bool                = True
+        self.safe_mode: bool                 = False
+        # task_id is NOT reset here — always set after _init_nominal_state() in reset()
+        self.task_id: str                    = "easy"
 
         # ── Active latent fault set ───────────────────────────────────
-        self._faults: set                   = set()
-        self._fault_timers: dict            = {}
+        self._faults: set                    = set()
+        self._fault_timers: dict             = {}
 
     # ──────────────────────────────────────────────────────────────────
     # OpenEnv Interface
@@ -145,38 +145,34 @@ class OrbitalAnomalyOpenenvEnvironment(Environment):
         """
         Reset into a deterministic benchmark task.
 
-        task_id resolution priority (most to least specific):
-          1. Explicit task_id argument (e.g. reset(task_id="medium"))
-          2. Pending task_id stored before base-class wrapping
-          3. Cycle via global counter (easy → medium → hard → easy …)
+        task_id resolution:
+          - Explicit task_id argument → use directly, do NOT touch counter
+          - No task_id → cycle via counter (easy → medium → hard → …)
 
-        Explicit requests NEVER advance the cycling counter so that
-        grader calls reset(task_id="easy"), reset(task_id="medium"),
-        reset(task_id="hard") always get exactly those scenarios.
+        The resolved task_id is saved to a LOCAL variable before
+        _init_nominal_state() runs, so the nominal-state reset can never
+        overwrite the chosen task.
         """
         self._state = State(episode_id=str(uuid4()), step_count=0)
 
-        # Resolve task_id
-        resolved = task_id or self._pending_task_id
-        self._pending_task_id = None
-
-        if resolved in TASK_IDS:
-            # Explicit request — use directly, do NOT touch counter
-            self.task_id = resolved
+        # ── Resolve task BEFORE _init_nominal_state() ────────────────
+        if task_id in TASK_IDS:
+            # Explicit request — never advance the cycle counter
+            resolved_task = task_id
         else:
-            # Cycling fallback
-            self.task_id = TASK_IDS[self.__class__._global_reset_count % len(TASK_IDS)]
+            # Cycling fallback — pick from counter, then advance it
+            resolved_task = TASK_IDS[self.__class__._global_reset_count % len(TASK_IDS)]
             self.__class__._global_reset_count += 1
 
+        # ── Reset all subsystem state ─────────────────────────────────
+        # _init_nominal_state() will set self.task_id = "easy" as a placeholder,
+        # but we immediately overwrite it below with resolved_task.
         self._init_nominal_state()
-        # Re-set task_id after _init_nominal_state (which resets to "easy")
-        # Determine again to be safe
-        if resolved in TASK_IDS:
-            self.task_id = resolved
-        # (cycling case already stored in self.task_id before _init_nominal_state,
-        #  but _init_nominal_state resets it — so we fix it here)
 
-        self._load_task(self.task_id)
+        # ── Apply the resolved task (always overwrites the placeholder) ─
+        self.task_id = resolved_task
+        self._load_task(resolved_task)
+
         return self._get_observation(reward=self._safe_reward(0.45), done=False)
 
     def step(self, action: OrbitalAnomalyOpenenvAction) -> OrbitalAnomalyOpenenvObservation:
@@ -204,10 +200,8 @@ class OrbitalAnomalyOpenenvEnvironment(Environment):
     # ──────────────────────────────────────────────────────────────────
 
     def _load_task(self, task_id: str) -> None:
-        """Load deterministic initial anomaly conditions and latent faults."""
-
-        # Always set task_id first so _init_nominal_state reset doesn't matter
-        self.task_id = task_id
+        """Load deterministic initial anomaly conditions and latent faults.
+        self.task_id must already be set by reset() before calling this."""
 
         if task_id == "easy":
             # Primary anomaly: ADCS misalignment + low battery + stuck MPPT
@@ -280,7 +274,7 @@ class OrbitalAnomalyOpenenvEnvironment(Environment):
             self._fault_timers              = {_F_RADIATOR_STUCK: 0, _F_AMPLIFIER_DEGRADE: 0}
 
         else:  # hard
-            # Cascading multi-subsystem failure — starts in eclipse, GS blackout, radiation
+            # Cascading multi-subsystem failure: eclipse, GS blackout, radiation, 7 faults
             self.battery_soc                = 22.0
             self.bus_voltage                = 23.5
             self.panel_health               = 0.55
@@ -322,7 +316,7 @@ class OrbitalAnomalyOpenenvEnvironment(Environment):
     # Orbital Context
     # ──────────────────────────────────────────────────────────────────
 
-    # Deterministic 16-step orbital schedule (sunlit, gs_visible, obs_window, radiation)
+    # Deterministic 16-step orbital schedule: (sunlit, gs_visible, obs_window, radiation)
     _ORBIT_SCHEDULE = [
         (True,  True,  False, False),  # 0
         (True,  True,  False, False),  # 1
@@ -346,10 +340,10 @@ class OrbitalAnomalyOpenenvEnvironment(Environment):
         slot = self._orbit_step % len(self._ORBIT_SCHEDULE)
         sunlit, gs, obs, rad = self._ORBIT_SCHEDULE[slot]
 
-        self.sunlit                  = sunlit
-        self.ground_station_visible  = gs
+        self.sunlit                    = sunlit
+        self.ground_station_visible    = gs
         self.observation_window_active = obs
-        self.radiation_zone          = rad
+        self.radiation_zone            = rad
 
         if self.radiation_zone:
             self.panel_health = max(0.1, self.panel_health - 0.005)
@@ -375,7 +369,7 @@ class OrbitalAnomalyOpenenvEnvironment(Environment):
             if _F_RW_SATURATION in self._faults:
                 wheel_authority *= 0.3
             reduction = 25.0 * wheel_authority
-            self.attitude_error_deg  = max(2.0, self.attitude_error_deg - reduction)
+            self.attitude_error_deg   = max(2.0, self.attitude_error_deg - reduction)
             self.sun_vector_alignment = math.cos(math.radians(self.attitude_error_deg))
             self.reaction_wheel_momentum = max(0.0, self.reaction_wheel_momentum - 0.12)
             self.wheel_saturation_level  = max(0.0, self.wheel_saturation_level  - 0.12)
@@ -402,14 +396,14 @@ class OrbitalAnomalyOpenenvEnvironment(Environment):
             self.attitude_error_deg  = max(5.0, self.attitude_error_deg - 8.0)
             self.sun_vector_alignment = math.cos(math.radians(self.attitude_error_deg))
             self.wheel_saturation_level = max(0.0, self.wheel_saturation_level - 0.10)
-            self.payload_temp   = max(self.payload_temp  - 8.0, _TEMP_SPACE)
-            self.avionics_temp  = max(self.avionics_temp - 4.0, _TEMP_SPACE)
+            self.payload_temp  = max(self.payload_temp  - 8.0,  _TEMP_SPACE)
+            self.avionics_temp = max(self.avionics_temp - 4.0, _TEMP_SPACE)
 
         elif action_type == "switch_power_bus":
             self._faults.discard(_F_BUS_SHORT)
             self.power_bus_redundancy = True
-            self.battery_soc  = min(_SOC_FULL,   self.battery_soc  + 6.0)
-            self.bus_voltage  = min(_BUS_NOMINAL, self.bus_voltage  + 1.5)
+            self.battery_soc = min(_SOC_FULL,   self.battery_soc + 6.0)
+            self.bus_voltage = min(_BUS_NOMINAL, self.bus_voltage + 1.5)
 
         # "noop" → no change
 
@@ -442,7 +436,7 @@ class OrbitalAnomalyOpenenvEnvironment(Environment):
             self.reaction_wheel_momentum = min(1.0, self.reaction_wheel_momentum + 0.04)
             self.wheel_saturation_level  = min(1.0, self.wheel_saturation_level  + 0.04)
             if age >= 2:
-                self.attitude_error_deg  = min(90.0, self.attitude_error_deg + 3.0)
+                self.attitude_error_deg   = min(90.0, self.attitude_error_deg + 3.0)
                 self.sun_vector_alignment = math.cos(math.radians(self.attitude_error_deg))
 
         elif fault == _F_GYRO_DRIFT:
@@ -537,7 +531,7 @@ class OrbitalAnomalyOpenenvEnvironment(Environment):
 
         self.reaction_wheel_momentum = min(1.0, self.reaction_wheel_momentum + 0.02)
         self.wheel_saturation_level  = min(1.0, self.wheel_saturation_level  + 0.02)
-        self.gyro_bias               = min(10.0, self.gyro_bias + 0.05)
+        self.gyro_bias = min(10.0, self.gyro_bias + 0.05)
 
         self.antenna_pointing_error = min(60.0,
             3.0 + self.attitude_error_deg * 0.5 + self.gyro_bias * 0.3
@@ -548,41 +542,34 @@ class OrbitalAnomalyOpenenvEnvironment(Environment):
     # ──────────────────────────────────────────────────────────────────
 
     def _thermal_update(self) -> None:
-        # Payload zone heating/cooling
         if self.payload_on:
             self.payload_temp += 5.0
         else:
             self.payload_temp -= 2.0
 
-        # Radiator rejection
         radiator_cooling = 4.0 * self.radiator_efficiency * self.thermal_loop_health
         self.payload_temp  -= radiator_cooling * 0.6
         self.avionics_temp -= radiator_cooling * 0.3
         self.battery_temp  -= radiator_cooling * 0.1
 
-        # Inter-zone conduction (one-step lag)
         conduction_pa = (self.payload_temp  - self.avionics_temp) * 0.08
         self.avionics_temp += conduction_pa
         conduction_ab = (self.avionics_temp - self.battery_temp)  * 0.06
         self.battery_temp  += conduction_ab
 
-        # Radiative cooling toward space
         for attr, k in [("payload_temp", 0.04), ("avionics_temp", 0.05), ("battery_temp", 0.06)]:
             t = getattr(self, attr)
             setattr(self, attr, t - k * (t - _TEMP_SPACE))
 
-        # Eclipse: battery cooling + heater compensation
         if not self.sunlit:
             self.battery_temp -= 2.5
             if self.heater_state and _F_HEATER_LATCH not in self._faults:
                 self.battery_temp += min(3.5, self.heater_draw * 0.6)
 
-        # Safe mode: active cooling of all zones
         if self.safe_mode:
             self.payload_temp  = max(self.payload_temp  - 3.0, _TEMP_SPACE)
             self.avionics_temp = max(self.avionics_temp - 2.0, _TEMP_SPACE)
 
-        # Clamp
         self.payload_temp  = max(-40.0, min(120.0, self.payload_temp))
         self.avionics_temp = max(-40.0, min(100.0, self.avionics_temp))
         self.battery_temp  = max(-40.0, min( 60.0, self.battery_temp))
