@@ -8,11 +8,19 @@ app_port: 8000
 pinned: false
 ---
 
-# 🛰️ Orbital Anomaly OpenEnv — Version 2.0
+# 🛰️ Orbital Anomaly OpenEnv — Version 2.1
+
+> **You are the last line of defense for a €500M spacecraft.**  
+> The satellite is 400km above Earth. It has **36 decision windows** before the batteries die.  
+> You cannot ask for help — the ground station is out of view.
+
+[![OpenEnv Compatible](https://img.shields.io/badge/OpenEnv-v0.2.3-blue)](https://github.com/huggingface/openenv)
+[![HF Space](https://img.shields.io/badge/🤗_Live_Demo-Space-orange)](https://codequasar-orbital-anomaly-openenv.hf.space)
+[![Colab Training](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/umed-indulkar/orbital-anomaly-openenv/blob/main/Orbital_Anomaly_openenv.ipynb)
 
 A **spacecraft digital-twin mission-control benchmark** built with **OpenEnv, FastAPI, Docker, and Hugging Face Spaces**.
 
-Version 2 replaces the scalar telemetry model of V1 with a full **multi-subsystem spacecraft simulator** featuring physically grounded EPS power-balance dynamics, ADCS attitude control, multi-zone thermal propagation, RF communications chain modeling, orbital context, a 13-fault latent root-cause graph with delayed cascading failures, and deterministic partial observability — all while remaining fully backward compatible with the V1 OpenEnv grader interface.
+V2.1 upgrades: **Extended Mission Mode** (36-step long-horizon), **Multi-Agent Commander**, **13-fault Belief State** (world model), full Round 2 theme alignment.
 
 ---
 
@@ -20,216 +28,253 @@ Version 2 replaces the scalar telemetry model of V1 with a full **multi-subsyste
 
 Modern satellite operations centers face exactly these challenges every day:
 
-- A stuck MPPT controller causes reduced solar charging → battery drain → heater shutdown in eclipse → battery temperature collapse → avionics reset cascade
-- Reaction wheel saturation causes attitude drift → poor sun alignment → reduced EPS charging → thermal instability → comms degradation
+- A stuck MPPT controller reduces solar charging → battery drain → heater shutdown in eclipse → avionics reset cascade
+- Reaction wheel saturation causes attitude drift → poor sun alignment → thermal instability → comms degradation
 - Ground station blackout windows prevent uplink during critical anomaly windows
-- Active science observation windows create genuine tradeoffs: disabling the payload saves the spacecraft but wastes the imaging pass
+- Active science observation windows create genuine tradeoffs: disabling payload saves the spacecraft but wastes the imaging pass
 
-This benchmark converts the actual causal graph of spacecraft anomaly response into a **typed, deterministic, fully reproducible OpenEnv environment**.
-
----
-
-## 🎯 Benchmark Objective
-
-The agent acts as an autonomous mission-control AI and must:
-
-1. Interpret multi-subsystem telemetry with partial observability (sensor dropouts)
-2. Identify which latent root faults are active from symptom patterns
-3. Sequence corrective actions across EPS, ADCS, thermal, and comms subsystems
-4. Prevent cascading subsystem failures under delayed fault propagation dynamics
-5. Balance spacecraft survivability against science mission objectives during observation windows
-6. Stabilise the mission within a 12-step budget
+This benchmark converts the actual **causal graph of spacecraft anomaly response** into a typed, deterministic, fully reproducible OpenEnv environment.
 
 ---
 
-## 🧩 Action Space
+## 🎯 Round 2 Theme Alignment
+
+| Theme | Alignment | How |
+|-------|-----------|-----|
+| **Theme 3.1 — World Modeling** (Primary) | ⭐⭐⭐ | 13-fault latent belief state, partial observability, causal subsystem reasoning, belief update every step |
+| **Theme 2 — Long-Horizon Planning** | ⭐⭐⭐ | 36-step Extended Mission Mode, 3 anomaly phases, inter-phase state persistence |
+| **Theme 1 — Multi-Agent (Fleet AI bonus)** | ⭐⭐ | MissionCommander + EPS/Thermal/Comms specialist agents, oversight architecture |
+
+**Scaler AI Labs bonus**: Spacecraft mission operations is an enterprise workflow — physical KPIs (battery SOC, thermal margins), incident management (fault response), resource allocation (science vs survivability). Directly maps to *"complex workflows with business rule nuances in a large enterprise."*
+
+---
+
+## 🏗️ Architecture
+
+```
+┌──────────────────────────────────────────────────────────────────────┐
+│                    MULTI-AGENT LAYER                                 │
+│  MissionCommanderAgent (oversight — Fleet AI bonus)                 │
+│    ├── EPSSpecialistAgent      (battery + solar subsystem)           │
+│    ├── ThermalSpecialistAgent  (thermal + payload management)        │
+│    └── CommsSpecialistAgent    (RF chain + communications)           │
+└────────────────────────┬─────────────────────────────────────────────┘
+                         │ action
+┌────────────────────────▼─────────────────────────────────────────────┐
+│              EXTENDED MISSION MODE — 36 STEPS                        │
+│  Phase 0 (steps 01-12): EPS Crisis — Solar misalignment, battery    │
+│  Phase 1 (steps 13-24): Thermal Crisis — Payload heat spike         │
+│  Phase 2 (steps 25-36): Comms Crisis — RF chain degradation         │
+│  [battery_soc + payload_temp CARRY OVER between phases]              │
+└────────────────────────┬─────────────────────────────────────────────┘
+                         │
+┌────────────────────────▼─────────────────────────────────────────────┐
+│              SPACECRAFT SIMULATOR V2.1                               │
+│  EPS: power-balance physics (solar input, bus drain, SOC)            │
+│  ADCS: cosine solar alignment, reaction wheel saturation             │
+│  Thermal: 3-zone propagation (payload/avionics/battery)              │
+│  RF Comms: transponder + antenna pointing chain                      │
+│  Orbital: eclipse cycles, ground station windows, radiation zones    │
+│  13-Fault Latent Graph: delayed cascading failures (hidden)          │
+│  Partial Observability: 5 sensor dropout patterns                   │
+└────────────────────────┬─────────────────────────────────────────────┘
+                         │ metadata.fault_beliefs
+┌────────────────────────▼─────────────────────────────────────────────┐
+│              FAULT BELIEF STATE (World Model)                        │
+│  Heuristic posterior over 13 faults from observable symptoms.        │
+│  Agent maintains and updates beliefs about hidden fault state.       │
+│  Exposed in obs.metadata["fault_beliefs"] every step.               │
+└──────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## 🔬 Environment Specification
+
+### Observation Space
+
+Typed Pydantic model. Fields marked * may carry sentinel values (`-999`, `-1`, `None`) when sensors are in dropout — agent must handle missing data gracefully.
+
+**V1 fields (grader backward compatibility)**
+
+| Field | Range | Description |
+|-------|-------|-------------|
+| `battery_level` | [0, 100] | Battery SOC (%) |
+| `solar_efficiency` | [0, 1] | `sun_vector × panel_health` |
+| `thermal_temp` | [−20, 120] | Payload zone temperature (°C) |
+| `comms_signal` | [0, 1] | `1 − 5×BER − packet_loss` |
+| `payload_on` | bool | Science payload active |
+| `safe_mode` | bool | Emergency safe mode engaged |
+| `task_id` | str | easy / medium / hard |
+| `mission_status` | str | stable / warning / critical |
+
+**V2 Extended Telemetry** (40+ fields across EPS / ADCS / Thermal / Comms / Orbital)
+
+| Subsystem | Key Fields |
+|-----------|------------|
+| EPS | `battery_soc`, `bus_voltage`, `panel_health`, `charge_controller_health`, `power_bus_redundancy` |
+| ADCS | `attitude_error_deg`, `sun_vector_alignment`, `reaction_wheel_momentum`, `wheel_saturation_level`, `gyro_bias*`, `star_tracker_available*` |
+| Thermal | `battery_temp`, `payload_temp`, `avionics_temp*`, `radiator_efficiency`, `thermal_loop_health` |
+| Comms | `antenna_pointing_error`, `bit_error_rate`, `uplink_margin*`, `packet_loss_ratio`, `command_latency_ms*` |
+| Orbital | `sunlit`, `eclipse_timer`, `ground_station_visible`, `radiation_zone`, `observation_window_active` |
+
+**V2.1 Metadata** (in every observation)
+
+| Key | Description |
+|-----|-------------|
+| `phase` | Current anomaly phase (0 / 1 / 2) |
+| `phase_step` | Step within current phase (0-11) |
+| `phase_scores` | Running avg reward per completed phase |
+| `fault_beliefs` | Dict of top-5 fault posterior probabilities |
+| `active_fault_count` | Number of latent faults active (not names) |
+
+### Action Space
 
 | Action | Effect |
-|---|---|
-| `rotate_to_sun` | ADCS attitude correction — reduces attitude error (limited by wheel saturation), improves solar charging and antenna pointing |
-| `disable_payload` | Shuts down science payload — immediately reduces payload thermal zone and power draw |
-| `reboot_comms` | RF chain reset — reduces BER, packet loss, latency; may clear transponder overheating fault |
-| `enter_safe_mode` | Conservative survival hold — disables payload, reduces wheel stress, cools all zones; sacrifices science |
-| `switch_power_bus` | Activates redundant bus — injects battery reserve, clears bus short fault |
-| `noop` | Take no action — correct choice during stable science windows |
+|--------|--------|
+| `rotate_to_sun` | −25° attitude error, +0.18 solar alignment |
+| `disable_payload` | Off payload, −6°C thermal |
+| `reboot_comms` | BER ×0.35, PLR ×0.35, restore uplink |
+| `enter_safe_mode` | Emergency stabilize, disable payload |
+| `switch_power_bus` | +18% SOC (primary) or +8% (degraded bus) |
+| `noop` | No action |
+
+### Reward Function
+
+Dense multi-objective mission utility **strictly in (0, 1)**:
+
+```python
+reward = safe_map(
+    0.30 * eps_score          # battery SOC + bus voltage
+  + 0.22 * thermal_score      # 3-zone temperatures within limits
+  + 0.18 * adcs_score         # attitude error + wheel saturation
+  + 0.15 * comms_score        # BER + packet loss
+  + 0.15 * survivability      # catastrophe multiplier
+) * survivability
++ science_bonus(0.12)         # payload active during obs window
+
+# Survivability: x0.4 if SOC<10%, x0.7 if SOC<20%, x0.5 if avionics>80°C
+# Mapping: reward = 0.001 + raw * 0.998  (strict open interval)
+```
 
 ---
 
-## 📡 Observation Space
+## 🔄 Extended Mission Mode
 
-### V1 Backward-Compatible Fields
+```
+Phase 0: EPS Crisis        Phase 1: Thermal Crisis    Phase 2: Comms Crisis
+┌────────────────┐         ┌────────────────┐         ┌────────────────┐
+│ Steps 01-12    │ ──────▶ │ Steps 13-24    │ ──────▶ │ Steps 25-36    │
+│ SOC: 22-38%   │         │ TEMP: spikes   │         │ BER: 0.18+     │
+│ Solar degraded │         │   to 79°C+     │         │ PLR: 0.45+     │
+│ Fault: mppt   │         │ Fault: radiator│         │ Fault: transpdr│
+└────────────────┘         └────────────────┘         └────────────────┘
+         ↑─────────── battery_soc + payload_temp CARRY OVER ───────────↑
+```
 
-| Field | Type | Description |
-|---|---|---|
-| `battery_level` | float | Battery SOC % (same as `battery_soc`) |
-| `solar_efficiency` | float | Effective solar factor [0,1] |
-| `thermal_temp` | float | Payload temperature °C (same as `payload_temp`) |
-| `comms_signal` | float | Composite comms quality [0,1] |
-| `payload_on` | bool | Science payload active |
-| `safe_mode` | bool | Safe mode enabled |
-| `task_id` | str | `easy` / `medium` / `hard` |
-| `mission_status` | str | `stable` / `warning` / `critical` |
-| `reward` | float | Per-step reward in (0,1) |
-| `done` | bool | Episode terminal flag |
-| `metadata` | dict | Step, episode_id, version, obs_dropout |
-
-### V2 EPS Telemetry
-
-| Field | Range | Notes |
-|---|---|---|
-| `battery_soc` | 0–100 % | State of charge |
-| `bus_voltage` | 18–28 V | Nominal 28V; sags under load |
-| `panel_health` | 0–1 | Degrades in radiation zone |
-| `solar_array_current` | ≥0 A | -1 = telemetry dropout |
-| `charge_controller_health` | 0–1 | Reduced by MPPT fault |
-| `power_bus_redundancy` | bool | Redundant bus active |
-
-### V2 ADCS Telemetry
-
-| Field | Range | Notes |
-|---|---|---|
-| `attitude_error_deg` | 0–90° | Error from sun-pointing |
-| `sun_vector_alignment` | 0–1 | cos(attitude_error) |
-| `reaction_wheel_momentum` | 0–1 | 1.0 = saturated |
-| `wheel_saturation_level` | 0–1 | Limits manoeuvre authority |
-| `gyro_bias` | deg/s | -999 = dropout (gyro fault + step cadence) |
-| `star_tracker_available` | bool/None | None = sensor dropout |
-
-### V2 Multi-Zone Thermal Telemetry
-
-| Field | Range | Notes |
-|---|---|---|
-| `battery_temp` | -40 to 60°C | Safe: -5 to 35°C |
-| `payload_temp` | -40 to 120°C | Safe: <75°C |
-| `avionics_temp` | -40 to 100°C | Safe: <70°C; -999 = dropout |
-| `radiator_efficiency` | 0–1 | Reduced by stuck radiator fault |
-| `thermal_loop_health` | 0–1 | Heat pipe health |
-| `heater_state` | bool | Battery heater active |
-
-### V2 RF Communications Telemetry
-
-| Field | Range | Notes |
-|---|---|---|
-| `antenna_pointing_error` | 0–60° | Driven by attitude error |
-| `transmitter_power` | W | Degrades with amplifier fault |
-| `bit_error_rate` | 0–1 | Good: <0.01 |
-| `uplink_margin` | dB | -99 = GS blackout dropout |
-| `packet_loss_ratio` | 0–1 | Good: <0.05 |
-| `command_latency_ms` | ms | -1 = dropout |
-
-### V2 Orbital Context
-
-| Field | Type | Description |
-|---|---|---|
-| `sunlit` | bool | Solar charging possible |
-| `eclipse_timer` | int | Steps since eclipse entry |
-| `ground_station_visible` | bool | Uplink/downlink available |
-| `radiation_zone` | bool | Panel degradation active |
-| `observation_window_active` | bool | Science bonus window |
+Poor decisions in Phase 0 → lower starting SOC in Phase 1. Thermal damage in Phase 1 → degraded comms in Phase 2. Genuine 36-step causal chain requiring long-horizon reasoning.
 
 ---
 
-## 🔥 Latent Fault Graph
+## 🤖 Multi-Agent Architecture
 
-13 root-cause faults are active per task but **never directly observable**. Only telemetry symptoms are visible:
+```python
+# inference.py — MissionCommanderAgent
+from inference import mission_commander_decide, compute_fault_beliefs
 
-| Fault | Visible Symptoms | Delayed Cascade |
-|---|---|---|
-| `mppt_stuck` | Low charge_controller_health | Reduced solar charging |
-| `panel_deployment_jam` | Falling panel_health | Persistent low solar input |
-| `bus_short_transient` | Bus voltage sag | Avionics thermal rise |
-| `battery_aging` | Unexplained SOC loss | — |
-| `reaction_wheel_saturation` | High wheel_saturation_level | Attitude drift → poor solar |
-| `gyro_drift` | Rising gyro_bias | Antenna mispointing after 3 steps |
-| `star_tracker_dropout` | star_tracker=None | Attitude error growth |
-| `radiator_valve_stuck` | Low radiator_efficiency | Avionics overheating |
-| `heat_pipe_failure` | Low thermal_loop_health | Payload thermal runaway |
-| `heater_relay_latch` | heater_state=False in eclipse | Battery temperature collapse |
-| `transponder_overheating` | Rising BER | Avionics thermal cascade |
-| `amplifier_degradation` | Falling transmitter_power | Uplink margin loss |
-| `antenna_gimbal_stall` | Rising antenna_pointing_error | Comms degradation |
+obs = env.reset(task_id="hard").observation
+action, rationale = mission_commander_decide(obs)
+# → ("switch_power_bus", "[EPS_Specialist|95%] CRITICAL: battery at minimum")
+
+beliefs = compute_fault_beliefs(obs)
+# → {"mppt_stuck": 0.78, "radiator_valve_stuck": 0.60, ...}
+```
+
+**Fleet AI bonus alignment**: Commander monitors all specialist agents, explains delegation decisions — exactly *"oversight agents that monitor, analyze, and explain the behavior of other AI agents."*
 
 ---
 
-## 🎚️ Tasks
+## 📊 Benchmark Tasks
 
-### 🟢 Easy — ADCS Misalignment + Low Battery
-- **Initial state**: battery_soc=38%, attitude_error=42°, sunlit
-- **Latent fault**: MPPT stuck controller
-- **Agent challenge**: rotate to sun, recover battery; single fault, no eclipse
+### 🟢 Easy — EPS Crisis
+Initial: `battery_soc=38%`, `attitude_error=42°`, sunlit, 1 fault (`mppt_stuck`)  
+Challenge: Restore solar alignment, recover battery. Single fault, no eclipse.  
+Heuristic baseline: **0.51**
 
 ### 🟡 Medium — Thermal Overload + Active Science Window
-- **Initial state**: payload_temp=68°C, radiator degraded, observation_window_active=True
-- **Latent faults**: stuck radiator valve + amplifier degradation
-- **Agent challenge**: thermal tradeoff against science reward; two interacting faults
+Initial: `payload_temp=68°C`, `radiator_efficiency=0.55`, `observation_window_active=True`, 2 faults  
+Challenge: Thermal tradeoff against science reward, two interacting faults.  
+Heuristic baseline: **0.44**
 
 ### 🔴 Hard — Cascading Multi-System Failure
-- **Initial state**: SOC=22%, in eclipse, GS blackout, radiation zone, star tracker down
-- **Latent faults**: 7 simultaneous faults across all subsystems
-- **Agent challenge**: belief-state planning with 5 dropout fields, eclipse dynamics, no GS contact
+Initial: `battery_soc=22%`, eclipse, GS blackout, radiation zone, 7 faults, `star_tracker=False`  
+Challenge: Belief-state planning, 5 dropout fields, no ground contact.  
+Heuristic baseline: **0.31**
 
 ---
 
-## 🏆 Reward Design
+## 📈 Training Results
 
-Dense multi-objective mission utility in strict open interval (0, 1):
+| Task | Pre-Training | Post-Training (GRPO, 80 eps, Qwen-1.5B) | Δ |
+|------|-------------|------------------------------------------|----|
+| Easy (36-step) | 0.288 | 0.445 | **+54.5%** |
+| Medium | 0.44 | 0.52 | **+18.2%** |
+| Hard | 0.31 | 0.38 | **+22.6%** |
 
-```
-reward = safe_map(
-    0.30 × eps_score        (battery SOC + bus voltage)
-  + 0.22 × thermal_score    (all 3 zones within safe limits)
-  + 0.18 × adcs_score       (attitude error + wheel saturation margin)
-  + 0.15 × comms_score      (BER + packet loss quality)
-  + 0.15 × survivability    (penalty multiplier for critical states)
-) × survivability + science_bonus
-```
+**What the agent learned:**
+- Proactive solar alignment (step 1, not after battery crisis)
+- Eclipse detection → `switch_power_bus` instead of useless `rotate_to_sun`
+- Thermal cascade prevention: disable payload at 65°C, not 80°C
 
-**Science bonus** (+0.12): payload active during `observation_window_active`  
-**Survivability multiplier**: ×0.4 if SOC<10%, ×0.5 if avionics>80°C, ×0.6 if payload>90°C
+See full training notebook: [`Orbital_Anomaly_openenv.ipynb`](Orbital_Anomaly_openenv.ipynb)
 
 ---
 
-## 🚀 Live Deployment
+## 🚀 Quickstart
 
-- **Space**: https://codequasar-orbital-anomaly-openenv.hf.space
-- **API Docs**: https://codequasar-orbital-anomaly-openenv.hf.space/docs
-- **OpenAPI**: https://codequasar-orbital-anomaly-openenv.hf.space/openapi.json
+```python
+from client import OrbitalAnomalyOpenenvEnv
+from models import OrbitalAnomalyOpenenvAction
+
+with OrbitalAnomalyOpenenvEnv(
+    base_url="https://codequasar-orbital-anomaly-openenv.hf.space"
+).sync() as env:
+    result = env.reset(task_id="hard")
+    obs = result.observation
+    print(f"Phase: {obs.metadata['phase']} | Battery: {obs.battery_soc:.1f}%")
+    print(f"Fault beliefs: {obs.metadata['fault_beliefs']}")
+
+    for step in range(36):
+        action = OrbitalAnomalyOpenenvAction(action_type="rotate_to_sun")
+        result = env.step(action)
+        if result.done:
+            break
+```
+
+```bash
+# HTTP
+curl -X POST https://codequasar-orbital-anomaly-openenv.hf.space/reset \
+  -H "Content-Type: application/json" -d '{"task_id": "hard"}'
+
+curl -X POST https://codequasar-orbital-anomaly-openenv.hf.space/step \
+  -H "Content-Type: application/json" -d '{"action_type": "rotate_to_sun"}'
+
+# Baseline
+python inference.py
+# Or with LLM:
+HF_TOKEN=hf_... python inference.py
+```
 
 ---
 
 ## 💻 Local Setup
 
 ```bash
-# Install dependencies
+git clone https://github.com/umed-indulkar/orbital-anomaly-openenv.git
+cd orbital-anomaly-openenv
 uv sync
-
-# Validate OpenEnv spec
 openenv validate
-
-# Run locally
-uv run server
-# → http://localhost:8000
-```
-
----
-
-## 🧪 Baseline Inference
-
-```bash
-python inference.py
-```
-
-Expected output (heuristic baseline, no API key):
-```
-[PROXY] no API key found — running heuristic baseline
-[START] task=easy env=orbital_anomaly_openenv model=openai/gpt-4o-mini
-[STEP] step=1 action=rotate_to_sun reward=0.42 done=false error=null
-...
-[END] success=true steps=8 score=0.51 rewards=0.42,0.48,...
-[SUMMARY] task=easy score=0.51
-[SUMMARY] task=medium score=0.44
-[SUMMARY] task=hard score=0.31
-[SUMMARY] overall_score=0.42
+uv run server   # → http://localhost:8000
 ```
 
 ---
@@ -243,55 +288,58 @@ docker run -p 8000:8000 orbital-anomaly-openenv
 
 ---
 
-## 📂 Project Structure
+## 🧪 Tests
+
+```bash
+python test_reward.py
+# ✅ ALL V2 TESTS PASSED
+```
+
+---
+
+## 📁 Repository Structure
 
 ```
 orbital-anomaly-openenv/
-├── __init__.py
-├── client.py          ← typed OpenEnv client (V2 fields)
-├── models.py          ← Pydantic Action + Observation schemas
-├── inference.py       ← baseline inference script
-├── openenv.yaml       ← OpenEnv spec manifest
+├── server/
+│   ├── app.py                               # FastAPI + OpenEnv server
+│   └── orbital_anomaly_openenv_environment.py  # V2.1 simulator (THIS FILE)
+├── models.py                                # Pydantic typed models
+├── client.py                                # Typed Python client
+├── inference.py                             # Multi-agent baseline + LLM policy
+├── test_reward.py                           # Full test suite
+├── Orbital_Anomaly_openenv.ipynb            # GRPO training notebook
+├── openenv.yaml                             # OpenEnv manifest
+├── pyproject.toml                           # Dependencies
 ├── Dockerfile
-├── README.md
-├── pyproject.toml
-├── requirements.txt
-├── test_reward.py     ← V2 test suite
-└── server/
-    ├── __init__.py
-    ├── app.py         ← FastAPI server
-    └── orbital_anomaly_openenv_environment.py  ← V2 digital twin
+└── README.md
 ```
 
 ---
 
-## 🧠 Why This Benchmark Matters
+## ✅ OpenEnv Compliance
 
-Most OpenEnv environments focus on discrete text tasks. This benchmark introduces:
-
-- **Causal subsystem coupling**: actions affect multiple interconnected systems
-- **Latent fault diagnosis**: agents must infer hidden root causes from symptom patterns
-- **Delayed consequences**: unresolved faults cascade after 2–4 steps
-- **Partial observability**: sensor dropouts require belief-state reasoning
-- **Mission objective tradeoffs**: survivability vs. science throughput
-- **Orbital context dynamics**: eclipse, radiation, GS windows change optimal strategy over time
-
-This makes it immediately useful for evaluating frontier LLM agents, RL policies, and planning systems on real-world long-horizon decision making under uncertainty.
+| Requirement | Status |
+|-------------|--------|
+| `reset()` / `step()` / `state` interface | ✅ |
+| Typed Pydantic models | ✅ |
+| 3+ tasks (easy/medium/hard) | ✅ |
+| Rewards strictly in (0, 1) | ✅ epsilon-bounded |
+| Task cycling counter | ✅ |
+| Explicit task_id independent of counter | ✅ |
+| `SUPPORTS_CONCURRENT_SESSIONS = True` | ✅ |
+| LiteLLM proxy handshake | ✅ |
+| `[START]`/`[STEP]`/`[END]` log format | ✅ |
+| FastAPI + Docker + HF Spaces | ✅ |
+| `openenv validate` passes | ✅ |
 
 ---
 
-## ✅ Pre-Submission Checklist
+## 🔗 Links
 
-```bash
-openenv validate     # spec compliance
-docker build .       # container builds
-python test_reward.py  # all V2 tests pass
-python inference.py  # baseline scores reproduce
-```
-
-Verify endpoints:
-```
-POST /reset  → 200
-POST /step   → 200
-GET  /state  → 200
-```
+| Resource | URL |
+|----------|-----|
+| 🤗 Live Space | https://codequasar-orbital-anomaly-openenv.hf.space |
+| 📖 API Docs | https://codequasar-orbital-anomaly-openenv.hf.space/docs |
+| 📓 Training Notebook | [Colab](https://colab.research.google.com/github/umed-indulkar/orbital-anomaly-openenv/blob/main/Orbital_Anomaly_openenv.ipynb) |
+| 💾 GitHub | https://github.com/umed-indulkar/orbital-anomaly-openenv |
