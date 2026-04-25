@@ -8,7 +8,7 @@ app_port: 8000
 pinned: false
 ---
 
-# 🛰️ Orbital Anomaly OpenEnv v2.1
+# 🛰️ Orbital Anomaly OpenEnv v2.2
 
 > **You are the last line of defense for a €500M spacecraft.**  
 > 400km above Earth. 36 decision windows before the batteries die.  
@@ -16,7 +16,9 @@ pinned: false
 
 [![OpenEnv](https://img.shields.io/badge/OpenEnv-v0.2.3-blue)](https://github.com/meta-pytorch/OpenEnv)
 [![Space](https://img.shields.io/badge/🤗_Live_Demo-HF_Space-orange)](https://codequasar-orbital-anomaly-openenv.hf.space)
-[![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/umed-indulkar/orbital-anomaly-openenv/blob/main/Orbital_Anomaly_openenv.ipynb)
+[![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/umed-indulkar/orbital-anomaly-openenv/blob/main/Orbital_Anomaly_openenv_V2.ipynb)
+[![Blog](https://img.shields.io/badge/📝_Blog-Read_Here-lightgrey)](./blog.md)
+[![Tests](https://img.shields.io/badge/Tests-8%2F8_passing-brightgreen)](#-tests)
 
 A **spacecraft digital-twin mission-control benchmark** for training LLM agents on **causal world modeling**, **long-horizon planning**, and **multi-agent coordination** under partial observability and delayed fault cascades.
 
@@ -67,14 +69,14 @@ Every fault mode, thermal cascade, and orbital constraint in this environment is
 └──────────────────────────────┬───────────────────────────────────────┘
                                │
 ┌──────────────────────────────▼───────────────────────────────────────┐
-│              SPACECRAFT SIMULATOR v2.1                               │
+│              SPACECRAFT SIMULATOR v2.2                               │
 │  EPS:     power-balance physics (solar input, bus drain, SOC)       │
 │  ADCS:    cosine solar alignment, reaction wheel saturation         │
 │  Thermal: 3-zone propagation (payload / avionics / battery)         │
 │  Comms:   transponder + antenna pointing chain                      │
 │  Orbital: eclipse cycles, GS windows, radiation, science windows   │
 │  Faults:  13-fault latent causal graph (hidden, cascading)          │
-│  Partial observability: 5 sensor dropout patterns                  │
+│  Partial observability: 6 sensor dropout patterns                  │
 └──────────────────────────────┬───────────────────────────────────────┘
                                │ metadata.fault_beliefs (every obs)
 ┌──────────────────────────────▼───────────────────────────────────────┐
@@ -114,15 +116,16 @@ Every fault mode, thermal cascade, and orbital constraint in this environment is
 | Comms | `antenna_pointing_error`, `transmitter_power`, `bit_error_rate`, `uplink_margin*`, `packet_loss_ratio`, `command_latency_ms*` |
 | Orbital | `sunlit`, `eclipse_timer`, `ground_station_visible`, `radiation_zone`, `observation_window_active` |
 
-**V2.1 metadata** (in every observation):
+**V2.2 metadata** (in every observation):
 
 | Key | Description |
 |-----|-------------|
 | `phase` | Current anomaly phase (0/1/2) |
 | `phase_step` | Step within phase (0–11) |
 | `phase_scores` | Running avg reward per completed phase |
-| `fault_beliefs` | Top-5 fault posterior probabilities (world model) |
+| `fault_beliefs` | 13-fault posterior probabilities (world model) |
 | `active_fault_count` | Count of active latent faults (not names) |
+| `dominant_subsystem` | Highest-belief fault subsystem: EPS / ADCS / Thermal / Comms |
 
 ### Action Space
 
@@ -152,10 +155,23 @@ reward = safe_map(
 + science_bonus(0.12)         # payload ON during observation_window_active
 
 # Survivability: ×0.4 if SOC<10%, ×0.7 if SOC<20%, ×0.5 if avionics>80°C
-# Mapping: reward = 0.001 + raw × 0.998  (strict open interval)
+# Mapping: reward = 0.001 + raw × 0.998  (strict open interval, grader-safe)
 ```
 
 Three independent reward components prevent single-objective reward hacking.
+
+### Partial Observability — Sensor Dropout Map
+
+Six telemetry fields drop out **deterministically** (not randomly), so agents can learn the dropout pattern:
+
+| Dropped Field | Dropout Condition |
+|---------------|-------------------|
+| `star_tracker_available` | `star_tracker_dropout` fault active |
+| `gyro_bias` | `gyro_drift` fault + `step % 4 == 0` |
+| `uplink_margin` | `ground_station_visible == False` |
+| `command_latency_ms` | `ground_station_visible == False` |
+| `avionics_temp` | `step % 3 == 2` |
+| `solar_array_current` | `step % 5 == 0` |
 
 ---
 
@@ -173,8 +189,9 @@ Three independent reward components prevent single-objective reward hacking.
 - **Baseline**: 0.55 | **Trained LLM**: ~0.65
 
 ### 🔴 Hard — Cascading Multi-System Failure
-- **State**: `battery_soc=22%`, eclipse, GS blackout, radiation zone, `star_tracker=False`, 7 faults
-- **Challenge**: Belief-state planning, 5 dropout fields, eclipse dynamics, no ground contact.
+- **State**: `battery_soc=22%`, eclipse, GS blackout, radiation zone, `star_tracker=False`, 7 simultaneous faults
+- **Faults**: `reaction_wheel_saturation`, `gyro_drift`, `star_tracker_dropout`, `heat_pipe_failure`, `heater_relay_latch`, `transponder_overheating`, `mppt_stuck`
+- **Challenge**: Belief-state planning, 6 dropout fields, eclipse dynamics, no ground contact.
 - **Baseline**: 0.07–0.13
 
 The dramatic easy→hard gap (0.57 vs 0.07) shows the environment meaningfully scales difficulty.
@@ -187,17 +204,33 @@ Method: **TRL GRPOTrainer + Unsloth 4-bit LoRA** on `Qwen2.5-1.5B-Instruct`
 
 | Task | Pre-Training | Post-Training | Δ |
 |------|-------------|---------------|---|
-| Easy (trained) | 0.57 | ~0.70 | +23% |
-| Medium (trained) | 0.55 | ~0.64 | +16% |
-| Hard (zero-shot) | 0.10 | ~0.10 | generalisation |
+| Easy | 0.57 | ~0.70 | +23% |
+| Medium | 0.55 | ~0.64 | +16% |
+| Hard | 0.10 | ~0.10 | generalisation baseline |
 
 ### What the Agent Learned
 
 1. **Eclipse detection**: Untrained model does `rotate_to_sun` in eclipse (useless — no sun). Trained model uses `switch_power_bus` instead. Requires tracking `sunlit=False` and understanding the causal chain: no sun → solar useless → use battery reserve.
 
-2. **Thermal cascade prevention**: Untrained model waits until thermal_temp > 80°C. Trained model disables payload at 65°C, preventing cascade 3-4 steps later. This is **temporal credit assignment** — the model learned delayed consequences.
+2. **Thermal cascade prevention**: Untrained model waits until `thermal_temp > 80°C`. Trained model disables payload at 65°C, preventing cascade 3-4 steps later. This is **temporal credit assignment** — the model learned delayed consequences.
 
 3. **Science window tradeoff**: Trained model holds payload ON during `observation_window_active` to capture +0.12 bonus, until temperature reaches a risk threshold. This is a genuine **multi-objective policy**.
+
+---
+
+## 📊 Training Visualizations
+
+All plots are produced automatically when running the Colab notebook. Each visualization cell is self-contained and auto-downloads the PNG.
+
+| File | Notebook Cell | What it shows |
+|------|--------------|---------------|
+| `images/task_snapshot.png` | Cell 3b | Initial telemetry for all 3 tasks side-by-side |
+| `images/baseline_distributions.png` | Cell 6b | Violin + scatter of baseline rewards per task |
+| `images/training_analysis.png` | Cell 12b | Training curve + pre/post bars + action heatmaps + improvement % |
+| `images/action_policy_heatmap.png` | Cell 13b | Before/after action policy heatmap across all tasks |
+| `images/fault_belief_evolution.png` | Cell 14b | 13-fault belief state updating step by step |
+| `images/telemetry_timeline_36step.png` | Cell 15b | All 4 subsystems tracked across 36 steps with phase bands |
+| `images/final_dashboard.png` | Cell 17b | Complete results dashboard — everything in one figure |
 
 ---
 
@@ -217,7 +250,7 @@ Step 1 — after switch_power_bus
   ...
 ```
 
-Judges watch the agent build its world model in real time. Available via `obs.metadata["fault_beliefs"]` every step.
+Judges watch the agent build its world model in real time. Available via `obs.metadata["fault_beliefs"]` every step. The `dominant_subsystem` key tells you which fault group is dominating, routing the `MissionCommanderAgent` to the right specialist automatically.
 
 ---
 
@@ -254,6 +287,8 @@ action, rationale, recs = mission_commander_decide(obs)
 #    "[EPS_Specialist|97%] CRITICAL: battery at floor — reserve bus",
 #    {"EPS_Specialist": (...), "Thermal_Specialist": (...), "Comms_Specialist": (...)})
 ```
+
+Every action includes a rationale string logged to stdout. Researchers and judges can inspect agent reasoning in real time.
 
 ---
 
@@ -347,16 +382,25 @@ All 8 tests must pass:
 ```
 orbital-anomaly-openenv/
 ├── server/
-│   ├── app.py                                    # FastAPI + OpenEnv server
-│   └── orbital_anomaly_openenv_environment.py    # V2.1 spacecraft simulator
-├── models.py                                     # Pydantic typed models (V1 + V2)
-├── client.py                                     # Typed Python client
-├── inference.py                                  # Multi-agent baseline + LLM policy
-├── test_reward.py                                # Complete V2 test suite
-├── Orbital_Anomaly_openenv.ipynb                 # GRPO training notebook (v3.0)
-├── openenv.yaml                                  # OpenEnv manifest
-├── pyproject.toml                                # Dependencies (uv)
-├── Dockerfile                                    # HF Spaces container
+│   ├── app.py                                       # FastAPI + OpenEnv server
+│   └── orbital_anomaly_openenv_environment.py       # V2.2 spacecraft simulator
+├── models.py                                        # Pydantic typed models (V1 + V2)
+├── client.py                                        # Typed Python client
+├── inference.py                                     # Multi-agent baseline + LLM policy
+├── test_reward.py                                   # Complete V2 test suite
+├── Orbital_Anomaly_openenv_V2.ipynb                 # GRPO training notebook (v4.1)
+├── blog.md                                          # Plain-English explainer + images
+├── images/                                          # All blog/training visualizations
+│   ├── task_snapshot.png
+│   ├── baseline_distributions.png
+│   ├── training_analysis.png
+│   ├── action_policy_heatmap.png
+│   ├── fault_belief_evolution.png
+│   ├── telemetry_timeline_36step.png
+│   └── final_dashboard.png
+├── openenv.yaml                                     # OpenEnv manifest
+├── pyproject.toml                                   # Dependencies (uv)
+├── Dockerfile                                       # HF Spaces container
 └── README.md
 ```
 
@@ -399,19 +443,19 @@ orbital-anomaly-openenv/
 
 2. **Temporal credit assignment**: Action at step 3 (disable payload) affects thermal at step 5, which affects comms at step 8. Short-sighted policies fail consistently.
 
-3. **Partial observability**: 5 sensor fields drop out deterministically. Agent must reason about what it cannot see.
+3. **Partial observability**: 6 sensor fields drop out deterministically. Agent must reason about what it cannot see.
 
 4. **Eclipse-conditional actions**: `rotate_to_sun` is useful in sunlight, useless in eclipse. Pre-trained models without environment experience fail this systematically.
 
 5. **Multi-objective tradeoff**: Science bonus (+0.12) vs thermal safety — no simple threshold resolves this without knowing current temperature trajectory and fault state.
 
+6. **Inter-phase state persistence**: In the 36-step extended mode, decisions in Phase 0 constrain what's possible in Phase 1 and Phase 2. Greedy per-phase optimization fails.
+
 ---
 
-## 📝 HuggingFace Blog Post
+## 📝 Blog Post
 
-**"Training LLMs to Save Dying Satellites: A 36-Step Long-Horizon OpenEnv Benchmark for Mission-Critical Decision Making"**
-
-→ [Read on HuggingFace](https://huggingface.co/blog) *(link after publication)*
+A complete beginner-friendly walkthrough of how this was built, what it does, and what the AI actually learned is in **[blog.md](./blog.md)**.
 
 ---
 
@@ -421,8 +465,9 @@ orbital-anomaly-openenv/
 |----------|-----|
 | 🤗 Live Space | https://codequasar-orbital-anomaly-openenv.hf.space |
 | 📖 Swagger Docs | https://codequasar-orbital-anomaly-openenv.hf.space/docs |
-| 📓 Training Colab | [Orbital_Anomaly_openenv.ipynb](https://colab.research.google.com/github/umed-indulkar/orbital-anomaly-openenv/blob/main/Orbital_Anomaly_openenv.ipynb) |
+| 📓 Training Colab | [Orbital_Anomaly_openenv_V2.ipynb](https://colab.research.google.com/github/umed-indulkar/orbital-anomaly-openenv/blob/main/Orbital_Anomaly_openenv_V2.ipynb) |
 | 💾 GitHub | https://github.com/umed-indulkar/orbital-anomaly-openenv |
+| 📝 Blog | [blog.md](./blog.md) |
 
 ---
 
