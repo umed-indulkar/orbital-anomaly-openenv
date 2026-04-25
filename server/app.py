@@ -290,10 +290,10 @@ header{flex-shrink:0;padding:12px 24px;border-bottom:1px solid var(--border);dis
 .hstat-lbl{font-size:7px;color:var(--muted);letter-spacing:1.5px;margin-bottom:1px}
 .hstat-val{font-family:var(--display);font-size:10px;color:var(--cyan)}
 .header-right{display:flex;gap:8px;align-items:center}
-.hlink{font-size:8px;color:var(--muted);text-decoration:none;letter-spacing:1px;padding:3px 10px;border:1px solid var(--border);border-radius:2px;transition:.2s}
-.hlink:hover{color:var(--cyan);border-color:var(--border-hot)}
-.hlink.hl-green{border-color:rgba(0,255,136,.25);color:var(--green)}
-.hlink.hl-green:hover{border-color:var(--green);box-shadow:0 0 8px rgba(0,255,136,.2)}
+.hlink{font-size:8px;color:rgba(184,204,216,0.85);text-decoration:none;letter-spacing:1px;padding:3px 10px;border:1px solid rgba(0,200,255,0.3);border-radius:2px;transition:.2s;text-shadow:0 0 8px rgba(0,212,255,0.15)}
+.hlink:hover{color:var(--cyan);border-color:var(--border-hot);background:rgba(0,212,255,0.06);text-shadow:0 0 12px rgba(0,212,255,0.4)}
+.hlink.hl-green{border-color:rgba(0,255,136,.5);color:var(--green);text-shadow:0 0 8px rgba(0,255,136,0.3);box-shadow:0 0 6px rgba(0,255,136,0.1)}
+.hlink.hl-green:hover{border-color:var(--green);box-shadow:0 0 14px rgba(0,255,136,.3);background:rgba(0,255,136,0.06)}
 main{flex:1;display:grid;grid-template-columns:1fr 520px;min-height:0}
 .left{position:relative;display:flex;flex-direction:column;align-items:center;justify-content:center;border-right:1px solid var(--border);overflow:hidden;padding:16px 28px;gap:14px;}
 .left::before{content:'';position:absolute;inset:0;pointer-events:none;z-index:0;background:repeating-linear-gradient(0deg,transparent,transparent 2px,rgba(0,0,0,0.04) 2px,rgba(0,0,0,0.04) 4px);}
@@ -396,7 +396,7 @@ svg.rchart{width:100%;height:52px;display:block}
 .verdict.show{display:block}
 .vd-title{font-family:var(--display);font-size:8px;letter-spacing:2px;color:var(--muted);margin-bottom:7px;display:flex;align-items:center;gap:8px}
 .vd-title-badge{padding:2px 8px;border-radius:2px;font-size:8px;font-family:var(--display)}
-.vd-grid{display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:5px}
+.vd-grid{display:grid;grid-template-columns:1fr 1fr 1fr 1fr 1fr;gap:5px}
 .vd-cell{padding:6px 8px;background:rgba(0,0,0,.25);border:1px solid var(--border);border-radius:2px;text-align:center}
 .vd-lbl{font-size:7px;color:var(--muted);letter-spacing:1.5px;margin-bottom:2px}
 .vd-val{font-family:var(--display);font-size:11px;font-weight:700}
@@ -514,6 +514,7 @@ svg.rchart{width:100%;height:52px;display:block}
       <div class="vd-cell"><div class="vd-lbl">TASK</div><div class="vd-val" id="vd-task" style="color:var(--cyan)">—</div></div>
       <div class="vd-cell"><div class="vd-lbl">AVG REWARD</div><div class="vd-val" id="vd-avg">—</div></div>
       <div class="vd-cell"><div class="vd-lbl">PEAK REWARD</div><div class="vd-val" id="vd-peak" style="color:var(--green)">—</div></div>
+      <div class="vd-cell"><div class="vd-lbl">STEPS TAKEN</div><div class="vd-val" id="vd-steps" style="color:var(--cyan)">—</div></div>
       <div class="vd-cell"><div class="vd-lbl">FINAL STATUS</div><div class="vd-val" id="vd-fin">—</div></div>
     </div>
   </div>
