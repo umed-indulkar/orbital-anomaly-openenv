@@ -2,6 +2,7 @@
 # All rights reserved.
 
 from __future__ import annotations
+import traceback
 from typing import Optional
 from fastapi import Request
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -13,7 +14,10 @@ except Exception as e:
 
 from models import OrbitalAnomalyOpenenvAction, OrbitalAnomalyOpenenvObservation
 from server.orbital_anomaly_openenv_environment import OrbitalAnomalyOpenenvEnvironment
-from inference import compute_fault_beliefs, dominant_subsystem, top_faults_str, mission_commander_decide
+from inference import (
+    compute_fault_beliefs, dominant_subsystem,
+    top_faults_str, mission_commander_decide,
+)
 
 app = create_app(
     OrbitalAnomalyOpenenvEnvironment,
@@ -24,30 +28,31 @@ app = create_app(
 )
 
 
+def _world_model(obs, env_obj=None):
+    meta    = obs.metadata or {}
+    beliefs = meta.get("fault_beliefs") or compute_fault_beliefs(obs)
+    dom     = meta.get("dominant_subsystem") or dominant_subsystem(beliefs)
+    return {
+        "dominant_subsystem": dom,
+        "top_faults":         top_faults_str(beliefs, 3),
+        "fault_beliefs":      beliefs,
+        "phase":              meta.get("phase", 0),
+        "phase_step":         meta.get("phase_step", 0),
+    }
+
+
 @app.post("/reset", include_in_schema=False)
 async def reset_with_task(request: Request) -> JSONResponse:
     try:
         body = await request.json()
     except Exception:
         body = {}
-    task_id: Optional[str] = body.get("task_id") if isinstance(body, dict) else None
+    task_id = body.get("task_id") if isinstance(body, dict) else None
     env: OrbitalAnomalyOpenenvEnvironment = request.app.state.env
     obs = env.reset(task_id=task_id)
-    meta    = obs.metadata or {}
-    beliefs = meta.get("fault_beliefs") or compute_fault_beliefs(obs)
-    dom     = meta.get("dominant_subsystem") or dominant_subsystem(beliefs)
-    return JSONResponse(content={
-        "observation": obs.model_dump(),
-        "reward": obs.reward,
-        "done": obs.done,
-        "world_model": {
-            "dominant_subsystem": dom,
-            "top_faults": top_faults_str(beliefs, 3),
-            "fault_beliefs": beliefs,
-            "phase": meta.get("phase", 0),
-            "phase_step": meta.get("phase_step", 0),
-        },
-    })
+    return JSONResponse({"observation": obs.model_dump(),
+                         "reward": obs.reward, "done": obs.done,
+                         "world_model": _world_model(obs)})
 
 
 @app.post("/step", include_in_schema=False)
@@ -56,508 +61,380 @@ async def step_with_rationale(request: Request) -> JSONResponse:
         body = await request.json()
     except Exception:
         body = {}
-    action_type: str = (body.get("action_type", "noop") if isinstance(body, dict) else "noop")
+    action_type = body.get("action_type", "noop") if isinstance(body, dict) else "noop"
     env: OrbitalAnomalyOpenenvEnvironment = request.app.state.env
     obs = env.step(OrbitalAnomalyOpenenvAction(action_type=action_type))
-    meta    = obs.metadata or {}
-    beliefs = meta.get("fault_beliefs") or compute_fault_beliefs(obs)
-    dom     = meta.get("dominant_subsystem") or dominant_subsystem(beliefs)
-    action_rec, rationale, specialist_recs = mission_commander_decide(obs)
-    return JSONResponse(content={
+    action_rec, rationale, recs = mission_commander_decide(obs)
+    return JSONResponse({
         "observation": obs.model_dump(),
-        "reward": obs.reward,
-        "done": obs.done,
+        "reward": obs.reward, "done": obs.done,
         "agent_decision": {
-            "recommended_action": action_rec,
-            "rationale": rationale,
+            "recommended_action": action_rec, "rationale": rationale,
             "specialists": {
-                name: {"action": r[0], "confidence": round(r[1], 3), "reason": r[2]}
-                for name, r in specialist_recs.items()
+                n: {"action": r[0], "confidence": round(r[1], 3), "reason": r[2]}
+                for n, r in recs.items()
             },
         },
-        "world_model": {
-            "dominant_subsystem": dom,
-            "top_faults": top_faults_str(beliefs, 3),
-            "fault_beliefs": beliefs,
-            "phase": meta.get("phase", 0),
-            "phase_step": meta.get("phase_step", 0),
-        },
+        "world_model": _world_model(obs),
     })
 
 
 @app.post("/run_episode", include_in_schema=False)
 async def run_full_episode(request: Request) -> JSONResponse:
-    """Run a complete episode autonomously and return all steps at once."""
+    """Run a complete autonomous episode; return all steps at once."""
     try:
         body = await request.json()
     except Exception:
         body = {}
-    task_id: Optional[str] = body.get("task_id", "easy") if isinstance(body, dict) else "easy"
-    env: OrbitalAnomalyOpenenvEnvironment = request.app.state.env
-    obs = env.reset(task_id=task_id)
+    task_id = (body.get("task_id", "easy") if isinstance(body, dict) else "easy")
 
-    steps = []
-    total_reward = 0.0
+    try:
+        env: OrbitalAnomalyOpenenvEnvironment = request.app.state.env
+        obs = env.reset(task_id=task_id)
+        steps = []
+        total_reward = 0.0
 
-    for step_num in range(12):
-        if env._check_done():
-            break
-        meta    = obs.metadata or {}
-        beliefs = meta.get("fault_beliefs") or compute_fault_beliefs(obs)
-        dom     = meta.get("dominant_subsystem") or dominant_subsystem(beliefs)
-        action, rationale, specialist_recs = mission_commander_decide(obs)
-        obs = env.step(OrbitalAnomalyOpenenvAction(action_type=action))
-        reward = float(obs.reward or 0.001)
-        total_reward += reward
-        meta2   = obs.metadata or {}
-        beliefs2 = meta2.get("fault_beliefs") or compute_fault_beliefs(obs)
+        for step_num in range(12):
+            if env._check_done():
+                break
 
-        steps.append({
-            "step":      step_num + 1,
-            "action":    action,
-            "rationale": rationale,
-            "reward":    round(reward, 4),
-            "done":      obs.done,
-            "telemetry": {
-                "battery_soc":      round(obs.battery_soc or 0, 1),
-                "solar_efficiency": round((obs.solar_efficiency or 0) * 100, 1),
-                "thermal_temp":     round(obs.thermal_temp or 0, 1),
-                "comms_signal":     round((obs.comms_signal or 0) * 100, 1),
-                "sunlit":           getattr(obs, "sunlit", True),
-                "payload_on":       obs.payload_on,
-                "mission_status":   obs.mission_status or "stable",
-            },
-            "world_model": {
-                "dominant_subsystem": dom,
-                "top_faults": top_faults_str(beliefs, 3),
-                "fault_beliefs": beliefs2,
-                "phase": meta2.get("phase", 0),
-            },
-            "specialists": {
-                name: {"action": r[0], "confidence": round(r[1], 3), "reason": r[2]}
-                for name, r in specialist_recs.items()
-            },
+            meta    = obs.metadata or {}
+            beliefs = meta.get("fault_beliefs") or compute_fault_beliefs(obs)
+            dom     = meta.get("dominant_subsystem") or dominant_subsystem(beliefs)
+            action, rationale, recs = mission_commander_decide(obs)
+
+            obs = env.step(OrbitalAnomalyOpenenvAction(action_type=action))
+            reward = float(obs.reward or 0.001)
+            total_reward += reward
+
+            meta2    = obs.metadata or {}
+            beliefs2 = meta2.get("fault_beliefs") or compute_fault_beliefs(obs)
+
+            steps.append({
+                "step":      step_num + 1,
+                "action":    action,
+                "rationale": rationale,
+                "reward":    round(reward, 4),
+                "done":      bool(obs.done),
+                "telemetry": {
+                    "battery_soc":      round(float(obs.battery_soc or 0), 1),
+                    "solar_efficiency": round(float((obs.solar_efficiency or 0) * 100), 1),
+                    "thermal_temp":     round(float(obs.thermal_temp or 0), 1),
+                    "comms_signal":     round(float((obs.comms_signal or 0) * 100), 1),
+                    "sunlit":           bool(getattr(obs, "sunlit", True)),
+                    "payload_on":       bool(obs.payload_on),
+                    "safe_mode":        bool(obs.safe_mode),
+                    "mission_status":   str(obs.mission_status or "stable"),
+                    "gs_visible":       bool(getattr(obs, "ground_station_visible", True)),
+                },
+                "world_model": {
+                    "dominant_subsystem": dom,
+                    "top_faults":         top_faults_str(beliefs, 3),
+                    "fault_beliefs":      {k: round(float(v), 3) for k, v in beliefs2.items()},
+                    "phase":              int(meta2.get("phase", 0)),
+                },
+                "specialists": {
+                    n: {"action": r[0], "confidence": round(float(r[1]), 3), "reason": str(r[2])}
+                    for n, r in recs.items()
+                },
+            })
+            if obs.done:
+                break
+
+        avg = round(total_reward / max(len(steps), 1), 4)
+        return JSONResponse({
+            "task_id":      task_id,
+            "total_steps":  len(steps),
+            "avg_reward":   avg,
+            "final_status": str(obs.mission_status or "stable"),
+            "steps":        steps,
         })
-        if obs.done:
-            break
 
-    return JSONResponse(content={
-        "task_id":      task_id,
-        "total_steps":  len(steps),
-        "avg_reward":   round(total_reward / max(len(steps), 1), 4),
-        "final_status": obs.mission_status or "stable",
-        "steps":        steps,
-    })
+    except Exception:
+        tb = traceback.format_exc()
+        print("[run_episode ERROR]", tb, flush=True)
+        return JSONResponse({"error": "Episode failed", "detail": tb}, status_code=500)
 
 
+# ── Dashboard HTML ─────────────────────────────────────────────────────────────
 DASHBOARD_HTML = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Orbital Anomaly — Mission Control</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=Space+Mono:ital,wght@0,400;0,700;1,400&family=Orbitron:wght@400;700;900&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Orbitron:wght@400;700;900&display=swap" rel="stylesheet">
 <style>
-:root {
-  --void: #020508;
-  --deep: #050d14;
-  --panel: rgba(8,20,35,0.85);
-  --border: rgba(0,212,255,0.12);
-  --border-hot: rgba(0,212,255,0.4);
-  --cyan: #00d4ff;
-  --cyan-dim: rgba(0,212,255,0.15);
-  --green: #00ff88;
-  --green-dim: rgba(0,255,136,0.12);
-  --amber: #ffb800;
-  --red: #ff3d3d;
-  --text: #c8dce8;
-  --muted: #3a5568;
-  --font-mono: 'Space Mono', monospace;
-  --font-display: 'Orbitron', monospace;
+:root{
+  --void:#020508;--deep:#050d14;--panel:rgba(6,16,28,0.9);
+  --border:rgba(0,200,255,0.12);--border-hot:rgba(0,200,255,0.45);
+  --cyan:#00d4ff;--cyan-dim:rgba(0,212,255,0.08);
+  --green:#00ff88;--amber:#ffb800;--red:#ff3d3d;--purple:#a855f7;
+  --text:#b8ccd8;--muted:#2d4a5a;
+  --mono:'Space Mono',monospace;--display:'Orbitron',monospace;
 }
-*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%;overflow:hidden}
+body{background:var(--void);color:var(--text);font-family:var(--mono);font-size:12px}
 
-body {
-  background: var(--void);
-  color: var(--text);
-  font-family: var(--font-mono);
-  font-size: 12px;
-  min-height: 100vh;
-  overflow-x: hidden;
-}
+/* Stars */
+.stars{position:fixed;inset:0;z-index:0;pointer-events:none;overflow:hidden}
+.star{position:absolute;border-radius:50%;background:#fff;animation:twinkle var(--d,3s) var(--delay,0s) ease-in-out infinite}
+@keyframes twinkle{0%,100%{opacity:var(--min,.1)}50%{opacity:var(--max,.8)}}
 
-/* ── STAR FIELD ── */
-.stars {
-  position: fixed; inset: 0; z-index: 0; pointer-events: none;
-  background:
-    radial-gradient(1px 1px at 20% 30%, rgba(255,255,255,0.6) 0%, transparent 100%),
-    radial-gradient(1px 1px at 80% 10%, rgba(255,255,255,0.4) 0%, transparent 100%),
-    radial-gradient(1px 1px at 60% 70%, rgba(255,255,255,0.5) 0%, transparent 100%),
-    radial-gradient(1px 1px at 40% 50%, rgba(255,255,255,0.3) 0%, transparent 100%),
-    radial-gradient(1px 1px at 90% 60%, rgba(255,255,255,0.6) 0%, transparent 100%),
-    radial-gradient(1px 1px at 10% 80%, rgba(255,255,255,0.4) 0%, transparent 100%),
-    radial-gradient(1px 1px at 50% 20%, rgba(255,255,255,0.5) 0%, transparent 100%),
-    radial-gradient(1px 1px at 70% 90%, rgba(255,255,255,0.3) 0%, transparent 100%),
-    radial-gradient(1px 1px at 30% 60%, rgba(255,255,255,0.4) 0%, transparent 100%),
-    radial-gradient(1px 1px at 85% 40%, rgba(255,255,255,0.5) 0%, transparent 100%);
+/* Layout */
+.shell{position:relative;z-index:1;height:100vh;display:flex;flex-direction:column}
+header{
+  flex-shrink:0;padding:14px 28px;
+  border-bottom:1px solid var(--border);
+  display:flex;align-items:center;justify-content:space-between;
+  background:rgba(2,5,8,0.8);backdrop-filter:blur(16px);
 }
-.stars::after {
-  content: '';
-  position: absolute; inset: 0;
-  background:
-    radial-gradient(ellipse 80% 50% at 50% 0%, rgba(0,40,80,0.4) 0%, transparent 60%),
-    radial-gradient(ellipse 60% 40% at 20% 100%, rgba(0,20,50,0.3) 0%, transparent 60%);
+.logo-text{font-family:var(--display);font-size:14px;font-weight:900;letter-spacing:3px;color:var(--cyan);text-shadow:0 0 20px rgba(0,212,255,0.35)}
+.logo-sub{font-size:9px;color:var(--muted);letter-spacing:2px;margin-top:2px}
+.header-right{display:flex;gap:10px;align-items:center}
+.hlink{font-size:9px;color:var(--muted);text-decoration:none;letter-spacing:1px;padding:3px 10px;border:1px solid var(--border);border-radius:2px;transition:.2s}
+.hlink:hover{color:var(--cyan);border-color:var(--border-hot)}
+
+main{flex:1;display:grid;grid-template-columns:1fr 500px;min-height:0}
+
+/* ─── LEFT ─── */
+.left{
+  position:relative;display:flex;flex-direction:column;
+  align-items:center;justify-content:center;
+  border-right:1px solid var(--border);
+  overflow:hidden;padding:20px 32px;gap:20px;
 }
 
-/* ── LAYOUT ── */
-.shell {
-  position: relative; z-index: 1;
-  min-height: 100vh;
-  display: flex; flex-direction: column;
+/* Scanline overlay */
+.left::before{
+  content:'';position:absolute;inset:0;pointer-events:none;z-index:0;
+  background:repeating-linear-gradient(0deg,transparent,transparent 2px,rgba(0,0,0,0.04) 2px,rgba(0,0,0,0.04) 4px);
 }
 
-/* ── HEADER ── */
-header {
-  padding: 20px 32px 16px;
-  border-bottom: 1px solid var(--border);
-  display: flex; align-items: center; justify-content: space-between;
-  background: rgba(2,5,8,0.7);
-  backdrop-filter: blur(12px);
+/* Earth */
+.earth-wrap{position:absolute;bottom:-220px;left:50%;transform:translateX(-50%);z-index:1}
+.earth{
+  width:460px;height:460px;border-radius:50%;
+  background:radial-gradient(circle at 32% 30%,#1e5a9a,#0d3060 35%,#071a38 65%,#030d1c);
+  box-shadow:0 0 80px rgba(20,100,220,0.25),0 0 160px rgba(10,60,160,0.1),inset 0 0 80px rgba(0,0,0,0.6);
 }
-.logo-text {
-  font-family: var(--font-display);
-  font-size: 15px; font-weight: 900; letter-spacing: 3px;
-  color: var(--cyan);
-  text-shadow: 0 0 20px rgba(0,212,255,0.4);
+.earth::after{
+  content:'';position:absolute;inset:-6px;border-radius:50%;
+  background:radial-gradient(circle,transparent 79%,rgba(60,160,255,0.07) 84%,rgba(30,100,200,0.03) 90%,transparent 94%);
+  animation:atmo 5s ease-in-out infinite;
 }
-.logo-sub { font-size: 10px; color: var(--muted); letter-spacing: 2px; margin-top: 2px; }
-.header-links { display: flex; gap: 16px; }
-.header-link {
-  font-size: 10px; color: var(--muted); text-decoration: none;
-  letter-spacing: 1px; padding: 4px 10px;
-  border: 1px solid var(--border); border-radius: 3px;
-  transition: all .2s;
-}
-.header-link:hover { color: var(--cyan); border-color: var(--border-hot); }
+@keyframes atmo{0%,100%{opacity:.5}50%{opacity:1}}
 
-/* ── MAIN CONTENT ── */
-main {
-  flex: 1; display: grid;
-  grid-template-columns: 1fr 520px;
-  grid-template-rows: 1fr;
-  gap: 0;
-  max-height: calc(100vh - 65px);
+/* Orbit ring */
+.orbit-ring{
+  position:absolute;z-index:2;
+  width:520px;height:180px;
+  bottom:60px;left:50%;transform:translateX(-50%);
+  border:1px dashed rgba(0,200,255,0.18);border-radius:50%;
+  pointer-events:none;
 }
 
-/* ── LEFT: SATELLITE SCENE ── */
-.sat-scene {
-  position: relative; display: flex;
-  flex-direction: column; align-items: center; justify-content: center;
-  padding: 40px;
-  border-right: 1px solid var(--border);
-  overflow: hidden;
+/* Satellite on orbit */
+.sat-orbit{
+  position:absolute;bottom:60px;left:50%;z-index:3;
+  width:0;height:0;
+  animation:sat-around 14s linear infinite;
+}
+.sat-orbit.fast{animation-duration:7s}
+@keyframes sat-around{
+  from{transform:rotate(-30deg) translateX(260px) rotate(30deg)}
+  to  {transform:rotate(330deg) translateX(260px) rotate(-330deg)}
+}
+.sat{
+  position:absolute;left:-30px;top:-16px;
+  width:60px;height:32px;display:flex;align-items:center;
+  filter:drop-shadow(0 0 6px rgba(0,212,255,0.6));
+}
+.sat-body{
+  width:22px;height:16px;flex-shrink:0;
+  background:linear-gradient(135deg,#1e3a5a,#0d2040);
+  border:1px solid rgba(0,212,255,0.5);border-radius:2px;position:relative;
+  box-shadow:0 0 8px rgba(0,212,255,0.2);
+}
+.sat-body::after{
+  content:'';position:absolute;inset:3px;border-radius:50%;
+  background:var(--cyan);opacity:.5;box-shadow:0 0 5px var(--cyan);
+}
+.wing{
+  width:18px;height:9px;flex-shrink:0;
+  background:linear-gradient(90deg,#1a3a72,#2a5090);
+  border:1px solid rgba(80,140,255,0.35);border-radius:1px;
+  transition:transform .6s,opacity .6s;
+}
+.wing.mis{transform:rotate(38deg);opacity:.4}
+.sig-ring{
+  position:absolute;top:-18px;left:8px;
+  width:10px;height:10px;border-radius:50%;
+  border:1px solid rgba(0,212,255,0.5);
+  animation:ring-expand 1.8s ease-out infinite;
+}
+.sig-ring::after{
+  content:'';position:absolute;inset:3px;border-radius:50%;
+  border:1px solid rgba(0,212,255,0.7);
+  animation:ring-expand 1.8s ease-out .5s infinite;
+}
+@keyframes ring-expand{0%{opacity:.9;transform:scale(1)}100%{opacity:0;transform:scale(2.8)}}
+.sat-glow{
+  position:absolute;inset:-20px;border-radius:50%;
+  background:radial-gradient(circle,rgba(0,212,255,0.18),transparent 70%);
+  animation:glow 3s ease-in-out infinite;
+}
+.sat-glow.warn{background:radial-gradient(circle,rgba(255,184,0,0.22),transparent 70%)}
+.sat-glow.crit{background:radial-gradient(circle,rgba(255,61,61,0.28),transparent 70%);animation-duration:1.2s}
+@keyframes glow{0%,100%{opacity:.5;transform:scale(1)}50%{opacity:1;transform:scale(1.12)}}
+
+/* Scene text */
+.scene-header{position:relative;z-index:4;text-align:center}
+.scene-title{font-family:var(--display);font-size:20px;font-weight:900;letter-spacing:5px;color:var(--cyan);text-shadow:0 0 25px rgba(0,212,255,0.3);margin-bottom:4px}
+.scene-sub{font-size:9px;color:var(--muted);letter-spacing:2px}
+
+/* Task cards */
+.task-grid{display:flex;gap:10px;position:relative;z-index:4;width:100%;max-width:580px}
+.task-card{
+  flex:1;padding:14px 10px;
+  background:rgba(6,16,28,0.7);border:1px solid var(--border);
+  border-radius:6px;cursor:pointer;text-align:center;
+  transition:all .22s;backdrop-filter:blur(8px);
+}
+.task-card:hover{border-color:var(--border-hot);background:var(--cyan-dim)}
+.task-card.sel-easy  {border-color:var(--cyan);background:rgba(0,212,255,0.07);box-shadow:0 0 18px rgba(0,212,255,0.12)}
+.task-card.sel-medium{border-color:var(--amber);background:rgba(255,184,0,0.07);box-shadow:0 0 18px rgba(255,184,0,0.12)}
+.task-card.sel-hard  {border-color:var(--red);background:rgba(255,61,61,0.07);box-shadow:0 0 18px rgba(255,61,61,0.12)}
+.t-icon{font-size:20px;margin-bottom:5px}
+.t-name{font-family:var(--display);font-size:9px;font-weight:700;letter-spacing:2px;margin-bottom:3px}
+.t-desc{font-size:9px;color:var(--muted);line-height:1.5;margin-bottom:6px}
+.t-tags{display:flex;gap:4px;justify-content:center;flex-wrap:wrap}
+.ttag{font-size:9px;padding:1px 6px;border-radius:2px;border:1px solid}
+.ttag-c{color:var(--cyan);border-color:rgba(0,212,255,.3);background:rgba(0,212,255,.07)}
+.ttag-a{color:var(--amber);border-color:rgba(255,184,0,.3);background:rgba(255,184,0,.07)}
+.ttag-r{color:var(--red);border-color:rgba(255,61,61,.3);background:rgba(255,61,61,.07)}
+
+/* Stat strip */
+.stat-strip{
+  display:flex;gap:16px;position:relative;z-index:4;
+  padding:10px 16px;background:rgba(0,0,0,0.3);
+  border:1px solid var(--border);border-radius:4px;width:100%;max-width:580px;
+}
+.stat-item{flex:1;text-align:center}
+.stat-lbl{font-size:8px;color:var(--muted);letter-spacing:1.5px;text-transform:uppercase;margin-bottom:3px}
+.stat-val{font-family:var(--display);font-size:13px;font-weight:700;color:var(--cyan)}
+
+/* Launch */
+.launch-btn{
+  font-family:var(--display);font-size:11px;font-weight:700;letter-spacing:3px;
+  padding:13px 44px;
+  background:linear-gradient(135deg,rgba(0,212,255,.12),rgba(0,80,140,.18));
+  border:1px solid var(--cyan);color:var(--cyan);cursor:pointer;
+  border-radius:3px;transition:all .2s;text-transform:uppercase;
+  box-shadow:0 0 18px rgba(0,212,255,.1);position:relative;z-index:4;
+}
+.launch-btn:hover{background:rgba(0,212,255,.2);box-shadow:0 0 28px rgba(0,212,255,.25);transform:translateY(-1px)}
+.launch-btn:active{transform:none}
+.launch-btn:disabled{opacity:.35;cursor:not-allowed;transform:none}
+.launch-btn.running{border-color:var(--amber);color:var(--amber);background:rgba(255,184,0,.08);animation:bpulse .9s ease-in-out infinite}
+@keyframes bpulse{0%,100%{box-shadow:0 0 16px rgba(255,184,0,.1)}50%{box-shadow:0 0 32px rgba(255,184,0,.35)}}
+
+/* ─── RIGHT ─── */
+.right{display:flex;flex-direction:column;min-height:0;background:rgba(2,6,10,0.55);backdrop-filter:blur(14px)}
+
+/* Score bar */
+.score-bar{
+  flex-shrink:0;display:grid;grid-template-columns:1fr 1fr 1fr;
+  border-bottom:1px solid var(--border);
+}
+.score-cell{padding:14px 16px;text-align:center;border-right:1px solid var(--border)}
+.score-cell:last-child{border-right:none}
+.sc-lbl{font-size:8px;color:var(--muted);letter-spacing:2px;text-transform:uppercase;margin-bottom:5px}
+.sc-val{font-family:var(--display);font-size:20px;font-weight:700;color:var(--cyan)}
+.sc-val.green{color:var(--green);text-shadow:0 0 12px rgba(0,255,136,.3)}
+.sc-val.amber{color:var(--amber);text-shadow:0 0 12px rgba(255,184,0,.3)}
+.sc-val.red  {color:var(--red);text-shadow:0 0 12px rgba(255,61,61,.3)}
+
+/* Chart */
+.chart-wrap{flex-shrink:0;padding:12px 20px 8px;border-bottom:1px solid var(--border)}
+.chart-lbl{font-size:8px;color:var(--muted);letter-spacing:2px;margin-bottom:6px}
+svg.rchart{width:100%;height:56px;display:block}
+
+/* World model ticker */
+.wm-ticker{
+  flex-shrink:0;padding:6px 20px;
+  border-bottom:1px solid var(--border);
+  background:rgba(0,0,0,0.2);
+  font-size:9px;color:var(--muted);letter-spacing:1px;
+  white-space:nowrap;overflow:hidden;
+}
+.wm-ticker span{color:var(--cyan)}
+
+/* Feed */
+.feed-wrap{flex:1;overflow-y:auto;padding:10px 16px;display:flex;flex-direction:column;gap:5px}
+.feed-wrap::-webkit-scrollbar{width:2px}
+.feed-wrap::-webkit-scrollbar-thumb{background:var(--muted);border-radius:1px}
+
+.idle{
+  flex:1;display:flex;flex-direction:column;
+  align-items:center;justify-content:center;gap:16px;padding:32px;text-align:center;
+}
+.idle-icon{font-size:40px;opacity:.2;animation:float 4s ease-in-out infinite}
+@keyframes float{0%,100%{transform:translateY(0)}50%{transform:translateY(-8px)}}
+.idle-txt{font-size:10px;color:var(--muted);line-height:1.9;letter-spacing:1px}
+.idle-hint{
+  font-size:9px;color:var(--muted);padding:8px 16px;
+  border:1px solid var(--border);border-radius:2px;letter-spacing:1px;
 }
 
-/* Earth glow */
-.earth {
-  position: absolute; bottom: -180px; left: 50%;
-  transform: translateX(-50%);
-  width: 420px; height: 420px;
-  border-radius: 50%;
-  background: radial-gradient(circle at 35% 35%,
-    #1a4a7a 0%, #0d2d52 30%, #081a30 60%, #040d18 100%);
-  box-shadow:
-    0 0 60px rgba(20,100,200,0.3),
-    0 0 120px rgba(10,60,140,0.15),
-    inset 0 0 60px rgba(0,0,0,0.5);
+/* Step card */
+.step-card{
+  padding:9px 12px;
+  background:rgba(255,255,255,0.018);
+  border:1px solid rgba(255,255,255,0.05);
+  border-left:2px solid transparent;
+  border-radius:3px;
+  opacity:0;transform:translateY(6px);
+  animation:sin .28s ease forwards;
+  display:grid;grid-template-columns:26px 1fr auto;gap:8px;align-items:start;
 }
-.earth::after {
-  content: '';
-  position: absolute; inset: -2px;
-  border-radius: 50%;
-  background: radial-gradient(circle at 30% 25%,
-    rgba(100,180,255,0.1) 0%, transparent 50%);
-}
-.earth-atmo {
-  position: absolute; bottom: -210px; left: 50%;
-  transform: translateX(-50%);
-  width: 480px; height: 480px;
-  border-radius: 50%;
-  background: radial-gradient(circle,
-    transparent 78%, rgba(50,140,255,0.08) 83%, rgba(30,100,200,0.04) 88%, transparent 93%);
-  animation: atmo-pulse 4s ease-in-out infinite;
-}
-@keyframes atmo-pulse { 0%,100%{opacity:.6} 50%{opacity:1} }
+@keyframes sin{to{opacity:1;transform:none}}
+.step-card.lv-high{border-left-color:var(--green)}
+.step-card.lv-mid {border-left-color:var(--cyan)}
+.step-card.lv-low {border-left-color:var(--amber)}
+.step-card.lv-crit{border-left-color:var(--red)}
+.sn{font-family:var(--display);font-size:9px;color:var(--muted);padding-top:2px}
+.sb{}
+.sa{font-family:var(--display);font-size:10px;font-weight:700;color:var(--cyan);margin-bottom:2px;letter-spacing:.5px}
+.sr-text{font-size:10px;color:#4a6a7a;line-height:1.5;margin-bottom:3px}
+.st{font-size:9px;color:rgba(180,210,225,.35);margin-bottom:4px}
 
-/* Orbit path */
-.orbit-path {
-  position: absolute;
-  width: 500px; height: 160px;
-  bottom: 30px; left: 50%;
-  transform: translateX(-50%);
-  border: 1px dashed rgba(0,212,255,0.15);
-  border-radius: 50%;
-  pointer-events: none;
-}
+/* Fault mini-bars */
+.fbars{display:flex;flex-direction:column;gap:2px;margin-top:3px}
+.fbar-row{display:grid;grid-template-columns:120px 1fr 26px;align-items:center;gap:5px}
+.fn{font-size:9px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.fb{height:3px;background:rgba(255,255,255,.05);border-radius:1px;overflow:hidden}
+.ff{height:100%;border-radius:1px;transition:width .5s}
+.fp{font-size:8px;text-align:right}
 
-/* Satellite */
-.sat-wrapper {
-  position: relative;
-  animation: orbit 12s linear infinite;
-  transform-origin: 0 80px;
-  margin-bottom: 60px;
-}
-@keyframes orbit {
-  0%   { transform: rotate(-40deg)  translateX(250px) rotate(40deg); }
-  100% { transform: rotate(320deg) translateX(250px) rotate(-320deg); }
-}
-.sat-wrapper.crisis { animation-duration: 6s; }
+/* Specialist mini grid */
+.specs{display:flex;gap:5px;margin-top:4px;flex-wrap:wrap}
+.spec-pill{font-size:9px;padding:1px 7px;border-radius:2px;border:1px solid;letter-spacing:.3px}
 
-.satellite {
-  position: relative; width: 60px; height: 30px;
-  display: flex; align-items: center; justify-content: center;
-  filter: drop-shadow(0 0 8px rgba(0,212,255,0.5));
-}
-.sat-body {
-  width: 24px; height: 18px;
-  background: linear-gradient(135deg, #1e3a5a, #0d2040);
-  border: 1px solid rgba(0,212,255,0.4);
-  border-radius: 3px;
-  position: relative;
-  box-shadow: 0 0 10px rgba(0,212,255,0.2);
-}
-.sat-body::after {
-  content: '';
-  position: absolute; top: 50%; left: 50%;
-  transform: translate(-50%,-50%);
-  width: 8px; height: 8px; border-radius: 50%;
-  background: var(--cyan);
-  opacity: .6;
-  box-shadow: 0 0 6px var(--cyan);
-}
-.sat-panel {
-  width: 20px; height: 10px;
-  background: linear-gradient(90deg, #1a3a6a, #2a5090);
-  border: 1px solid rgba(100,160,255,0.3);
-  border-radius: 1px;
-  position: absolute;
-}
-.sat-panel.left  { right: calc(100% + 4px); top: 4px; }
-.sat-panel.right { left:  calc(100% + 4px); top: 4px; }
-.sat-panel.misaligned { transform: rotate(35deg); opacity: .5; }
+.srw{font-family:var(--display);font-size:12px;font-weight:700;padding-top:2px}
 
-.sat-antenna {
-  position: absolute; top: -10px; left: 50%;
-  width: 1px; height: 10px;
-  background: linear-gradient(to top, rgba(0,212,255,0.6), transparent);
-  transform: translateX(-50%);
-}
-.sat-signal {
-  position: absolute; top: -20px; left: 50%;
-  transform: translateX(-50%);
-  width: 12px; height: 12px;
-  border: 1px solid rgba(0,212,255,0.4);
-  border-radius: 50%;
-  animation: signal-pulse 2s ease-out infinite;
-}
-.sat-signal::after {
-  content: '';
-  position: absolute; inset: 3px;
-  border: 1px solid rgba(0,212,255,0.6);
-  border-radius: 50%;
-  animation: signal-pulse 2s ease-out infinite .4s;
-}
-@keyframes signal-pulse { 0%{opacity:.8;transform:scale(1)} 100%{opacity:0;transform:scale(2.5)} }
-
-/* Status glow */
-.sat-glow {
-  position: absolute; inset: -15px;
-  border-radius: 50%;
-  background: radial-gradient(circle, rgba(0,212,255,0.15) 0%, transparent 70%);
-  animation: glow-pulse 3s ease-in-out infinite;
-}
-.sat-glow.critical { background: radial-gradient(circle, rgba(255,61,61,0.25) 0%, transparent 70%); }
-.sat-glow.warning  { background: radial-gradient(circle, rgba(255,184,0,0.2) 0%, transparent 70%); }
-@keyframes glow-pulse { 0%,100%{opacity:.5;transform:scale(1)} 50%{opacity:1;transform:scale(1.1)} }
-
-/* Scene info */
-.scene-title {
-  font-family: var(--font-display);
-  font-size: 22px; font-weight: 900; letter-spacing: 4px;
-  color: var(--cyan);
-  text-shadow: 0 0 30px rgba(0,212,255,0.3);
-  text-align: center; margin-bottom: 6px;
-  position: relative; z-index: 2;
-}
-.scene-sub {
-  font-size: 10px; color: var(--muted); letter-spacing: 2px;
-  text-align: center; margin-bottom: 40px;
-  position: relative; z-index: 2;
-}
-
-/* Task selector */
-.task-grid {
-  display: flex; gap: 12px; margin-bottom: 32px;
-  position: relative; z-index: 2;
-}
-.task-card {
-  flex: 1; padding: 14px 12px;
-  background: var(--panel);
-  border: 1px solid var(--border);
-  border-radius: 6px; cursor: pointer;
-  transition: all .25s; text-align: center;
-  backdrop-filter: blur(8px);
-}
-.task-card:hover { border-color: var(--border-hot); background: var(--cyan-dim); }
-.task-card.selected { border-color: var(--cyan); background: var(--cyan-dim); box-shadow: 0 0 20px rgba(0,212,255,0.15); }
-.task-card.selected.hard { border-color: var(--red); background: rgba(255,61,61,0.08); box-shadow: 0 0 20px rgba(255,61,61,0.15); }
-.task-card.selected.medium { border-color: var(--amber); background: rgba(255,184,0,0.08); box-shadow: 0 0 20px rgba(255,184,0,0.15); }
-.task-icon { font-size: 22px; margin-bottom: 6px; }
-.task-name { font-family: var(--font-display); font-size: 9px; letter-spacing: 2px; font-weight: 700; }
-.task-desc { font-size: 9px; color: var(--muted); margin-top: 4px; line-height: 1.4; }
-.task-stats { display: flex; gap: 6px; justify-content: center; margin-top: 8px; flex-wrap: wrap; }
-.task-tag { font-size: 9px; padding: 1px 6px; border-radius: 2px; }
-.tag-easy   { background: rgba(0,255,136,0.12); color: var(--green); }
-.tag-medium { background: rgba(255,184,0,0.12); color: var(--amber); }
-.tag-hard   { background: rgba(255,61,61,0.12); color: var(--red); }
-
-/* Launch button */
-.launch-btn {
-  font-family: var(--font-display);
-  font-size: 12px; font-weight: 700; letter-spacing: 3px;
-  padding: 14px 40px;
-  background: linear-gradient(135deg, rgba(0,212,255,0.15), rgba(0,100,160,0.2));
-  border: 1px solid var(--cyan);
-  color: var(--cyan); cursor: pointer;
-  border-radius: 4px;
-  transition: all .2s;
-  text-transform: uppercase;
-  box-shadow: 0 0 20px rgba(0,212,255,0.1);
-  position: relative; z-index: 2;
-}
-.launch-btn:hover { background: rgba(0,212,255,0.2); box-shadow: 0 0 30px rgba(0,212,255,0.25); transform: translateY(-1px); }
-.launch-btn:active { transform: translateY(0); }
-.launch-btn:disabled { opacity: .4; cursor: not-allowed; transform: none; }
-.launch-btn.running {
-  border-color: var(--amber); color: var(--amber);
-  background: rgba(255,184,0,0.1);
-  animation: btn-pulse .8s ease-in-out infinite;
-}
-@keyframes btn-pulse { 0%,100%{box-shadow:0 0 20px rgba(255,184,0,0.15)} 50%{box-shadow:0 0 35px rgba(255,184,0,0.35)} }
-
-/* ── RIGHT: RESULTS PANEL ── */
-.results-panel {
-  display: flex; flex-direction: column;
-  background: rgba(2,6,10,0.6);
-  backdrop-filter: blur(12px);
-  overflow: hidden;
-}
-
-/* Score header */
-.score-bar {
-  padding: 20px 24px 16px;
-  border-bottom: 1px solid var(--border);
-  display: grid; grid-template-columns: 1fr 1fr 1fr;
-  gap: 12px;
-}
-.score-metric { text-align: center; }
-.score-label { font-size: 9px; color: var(--muted); letter-spacing: 2px; text-transform: uppercase; margin-bottom: 4px; }
-.score-value { font-family: var(--font-display); font-size: 22px; font-weight: 700; }
-.score-value.cyan  { color: var(--cyan); text-shadow: 0 0 15px rgba(0,212,255,0.4); }
-.score-value.green { color: var(--green); text-shadow: 0 0 15px rgba(0,255,136,0.3); }
-.score-value.amber { color: var(--amber); text-shadow: 0 0 15px rgba(255,184,0,0.3); }
-.score-value.red   { color: var(--red); text-shadow: 0 0 15px rgba(255,61,61,0.3); }
-
-/* Reward chart */
-.chart-wrap { padding: 16px 24px 8px; border-bottom: 1px solid var(--border); }
-.chart-label { font-size: 9px; color: var(--muted); letter-spacing: 2px; margin-bottom: 8px; }
-svg.chart { width: 100%; height: 64px; }
-
-/* Step feed */
-.step-feed {
-  flex: 1; overflow-y: auto;
-  padding: 12px 24px;
-  display: flex; flex-direction: column; gap: 6px;
-}
-.step-feed::-webkit-scrollbar { width: 3px; }
-.step-feed::-webkit-scrollbar-track { background: transparent; }
-.step-feed::-webkit-scrollbar-thumb { background: var(--muted); border-radius: 2px; }
-
-.step-item {
-  display: grid; grid-template-columns: 28px 1fr auto;
-  gap: 10px; align-items: start;
-  padding: 10px 12px;
-  background: rgba(255,255,255,0.02);
-  border: 1px solid rgba(255,255,255,0.04);
-  border-radius: 4px;
-  opacity: 0; transform: translateY(8px);
-  animation: step-in .3s ease forwards;
-  border-left: 2px solid transparent;
-}
-@keyframes step-in { to { opacity: 1; transform: none; } }
-.step-item.high  { border-left-color: var(--green); }
-.step-item.mid   { border-left-color: var(--cyan); }
-.step-item.low   { border-left-color: var(--amber); }
-.step-item.crit  { border-left-color: var(--red); }
-
-.step-num {
-  font-family: var(--font-display); font-size: 10px; font-weight: 700;
-  color: var(--muted); padding-top: 1px;
-}
-.step-body {}
-.step-action {
-  font-family: var(--font-display); font-size: 10px; font-weight: 700;
-  color: var(--cyan); margin-bottom: 3px; letter-spacing: 1px;
-}
-.step-rationale { font-size: 10px; color: var(--muted); line-height: 1.5; }
-.step-tele { font-size: 10px; color: rgba(200,220,232,0.5); margin-top: 3px; }
-.step-reward {
-  font-family: var(--font-display); font-size: 13px; font-weight: 700;
-  padding-top: 1px;
-}
-
-/* Fault belief mini-bars */
-.fault-mini { margin-top: 6px; display: flex; flex-direction: column; gap: 2px; }
-.fault-mini-row { display: flex; align-items: center; gap: 6px; }
-.fault-mini-name { font-size: 9px; color: var(--muted); width: 130px; flex-shrink: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.fault-mini-bar { flex: 1; height: 3px; background: rgba(255,255,255,0.06); border-radius: 2px; overflow: hidden; }
-.fault-mini-fill { height: 100%; border-radius: 2px; }
-.fault-mini-pct { font-size: 9px; width: 28px; text-align: right; flex-shrink: 0; }
-
-/* Final verdict */
-.verdict {
-  padding: 16px 24px;
-  border-top: 1px solid var(--border);
-  display: none;
-}
-.verdict.visible { display: block; }
-.verdict-title {
-  font-family: var(--font-display); font-size: 11px;
-  letter-spacing: 2px; color: var(--muted); margin-bottom: 10px;
-}
-.verdict-row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
-.verdict-label { font-size: 11px; color: var(--text); }
-.verdict-val { font-family: var(--font-display); font-size: 11px; font-weight: 700; }
-
-/* Idle state */
-.idle-msg {
-  flex: 1; display: flex; flex-direction: column;
-  align-items: center; justify-content: center;
-  gap: 12px; padding: 40px;
-  text-align: center;
-}
-.idle-icon { font-size: 36px; opacity: .3; }
-.idle-text { font-size: 11px; color: var(--muted); line-height: 1.7; letter-spacing: 1px; }
-
-/* Action icon map */
-.action-icons { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 4px; }
-.a-badge { font-size: 9px; padding: 2px 6px; border-radius: 2px; border: 1px solid; }
+/* Verdict */
+.verdict{flex-shrink:0;border-top:1px solid var(--border);padding:12px 20px;display:none}
+.verdict.show{display:block}
+.vd-title{font-family:var(--display);font-size:9px;letter-spacing:2px;color:var(--muted);margin-bottom:8px}
+.vd-grid{display:grid;grid-template-columns:1fr 1fr;gap:6px}
+.vd-cell{padding:7px 10px;background:rgba(0,0,0,.25);border:1px solid var(--border);border-radius:2px}
+.vd-lbl{font-size:8px;color:var(--muted);letter-spacing:1.5px;margin-bottom:2px}
+.vd-val{font-family:var(--display);font-size:12px;font-weight:700}
 </style>
 </head>
 <body>
-
-<div class="stars"></div>
+<div class="stars" id="stars"></div>
 <div class="shell">
 
 <header>
@@ -565,326 +442,355 @@ svg.chart { width: 100%; height: 64px; }
     <div class="logo-text">ORBITAL ANOMALY</div>
     <div class="logo-sub">MISSION CONTROL · OPENENV v2.2</div>
   </div>
-  <div class="header-links">
-    <a href="/docs" class="header-link">API DOCS</a>
-    <a href="/state" class="header-link">RAW STATE</a>
-    <a href="https://github.com/umed-indulkar/orbital-anomaly-openenv" class="header-link" target="_blank">GITHUB</a>
+  <div class="header-right">
+    <a href="/docs" class="hlink">API DOCS</a>
+    <a href="/state" class="hlink">RAW STATE</a>
+    <a href="https://github.com/umed-indulkar/orbital-anomaly-openenv" class="hlink" target="_blank">GITHUB</a>
   </div>
 </header>
 
 <main>
-
-  <!-- LEFT: Scene + Controls -->
-  <div class="sat-scene">
-    <div class="earth"></div>
-    <div class="earth-atmo"></div>
-    <div class="orbit-path"></div>
-
-    <div class="sat-wrapper" id="sat-wrapper">
-      <div class="satellite">
-        <div class="sat-glow" id="sat-glow"></div>
-        <div class="sat-panel left" id="panel-left"></div>
-        <div class="sat-body"></div>
-        <div class="sat-panel right" id="panel-right"></div>
-        <div class="sat-antenna"></div>
-        <div class="sat-signal" id="sat-signal"></div>
-      </div>
+<!-- LEFT -->
+<div class="left">
+  <!-- Earth + Satellite -->
+  <div class="earth-wrap"><div class="earth"></div></div>
+  <div class="orbit-ring"></div>
+  <div class="sat-orbit" id="sat-orbit">
+    <div class="sat">
+      <div class="sat-glow" id="sat-glow"></div>
+      <div class="wing" id="wing-l"></div>
+      <div class="sat-body"></div>
+      <div class="wing" id="wing-r"></div>
+      <div class="sig-ring" id="sig-ring"></div>
     </div>
-
-    <div class="scene-title">SELECT MISSION</div>
-    <div class="scene-sub" id="scene-sub">CHOOSE A CRISIS SCENARIO · AGENT WILL RESPOND</div>
-
-    <div class="task-grid">
-      <div class="task-card selected easy" onclick="selectTask('easy', this)">
-        <div class="task-icon">🟢</div>
-        <div class="task-name">EASY</div>
-        <div class="task-desc">EPS Crisis<br>Single fault · Sunlit</div>
-        <div class="task-stats">
-          <span class="task-tag tag-easy">SOC 38%</span>
-          <span class="task-tag tag-easy">1 FAULT</span>
-        </div>
-      </div>
-      <div class="task-card medium" onclick="selectTask('medium', this)">
-        <div class="task-icon">🟡</div>
-        <div class="task-name">MEDIUM</div>
-        <div class="task-desc">Thermal + Science<br>Dual fault · Tradeoff</div>
-        <div class="task-stats">
-          <span class="task-tag tag-medium">TEMP 68°C</span>
-          <span class="task-tag tag-medium">2 FAULTS</span>
-        </div>
-      </div>
-      <div class="task-card hard" onclick="selectTask('hard', this)">
-        <div class="task-icon">🔴</div>
-        <div class="task-name">HARD</div>
-        <div class="task-desc">Cascade Failure<br>Eclipse · 7 faults</div>
-        <div class="task-stats">
-          <span class="task-tag tag-hard">SOC 22%</span>
-          <span class="task-tag tag-hard">7 FAULTS</span>
-        </div>
-      </div>
-    </div>
-
-    <button class="launch-btn" id="launch-btn" onclick="launchMission()">
-      ▶ LAUNCH MISSION
-    </button>
   </div>
 
-  <!-- RIGHT: Results -->
-  <div class="results-panel">
-
-    <div class="score-bar" id="score-bar">
-      <div class="score-metric">
-        <div class="score-label">AVG REWARD</div>
-        <div class="score-value cyan" id="sc-avg">—</div>
-      </div>
-      <div class="score-metric">
-        <div class="score-label">STEPS</div>
-        <div class="score-value cyan" id="sc-steps">—</div>
-      </div>
-      <div class="score-metric">
-        <div class="score-label">FINAL STATUS</div>
-        <div class="score-value cyan" id="sc-status">—</div>
-      </div>
-    </div>
-
-    <div class="chart-wrap">
-      <div class="chart-label">REWARD TIMELINE</div>
-      <svg class="chart" viewBox="0 0 460 64" preserveAspectRatio="none">
-        <defs>
-          <linearGradient id="rg" x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%" stop-color="rgba(0,212,255,0.3)"/>
-            <stop offset="100%" stop-color="rgba(0,212,255,0)"/>
-          </linearGradient>
-        </defs>
-        <line x1="0" y1="46" x2="460" y2="46" stroke="rgba(255,184,0,0.2)" stroke-width="1" stroke-dasharray="4"/>
-        <text x="4" y="44" font-size="8" fill="rgba(255,184,0,0.4)" font-family="Space Mono">0.45</text>
-        <path id="chart-area" fill="url(#rg)" d=""/>
-        <polyline id="chart-line" fill="none" stroke="#00d4ff" stroke-width="1.5"
-          stroke-linecap="round" stroke-linejoin="round" points=""/>
-      </svg>
-    </div>
-
-    <div id="feed-container" style="flex:1;display:flex;flex-direction:column;overflow:hidden">
-      <div class="idle-msg" id="idle-msg">
-        <div class="idle-icon">🛰️</div>
-        <div class="idle-text">
-          SELECT A MISSION SCENARIO<br>AND LAUNCH THE AGENT<br><br>
-          THE AI WILL EXECUTE 12 DECISION STEPS<br>
-          USING THE MULTI-AGENT COMMANDER<br>
-          + EPS · THERMAL · COMMS SPECIALISTS
-        </div>
-      </div>
-      <div class="step-feed" id="step-feed" style="display:none"></div>
-    </div>
-
-    <div class="verdict" id="verdict">
-      <div class="verdict-title">MISSION DEBRIEF</div>
-      <div class="verdict-row">
-        <span class="verdict-label">Task</span>
-        <span class="verdict-val cyan" id="vd-task">—</span>
-      </div>
-      <div class="verdict-row">
-        <span class="verdict-label">Avg Reward</span>
-        <span class="verdict-val" id="vd-avg">—</span>
-      </div>
-      <div class="verdict-row">
-        <span class="verdict-label">Steps Taken</span>
-        <span class="verdict-val cyan" id="vd-steps">—</span>
-      </div>
-      <div class="verdict-row">
-        <span class="verdict-label">Final Status</span>
-        <span class="verdict-val" id="vd-status">—</span>
-      </div>
-    </div>
-
+  <!-- Title -->
+  <div class="scene-header" style="margin-bottom:4px">
+    <div class="scene-title" id="scene-title">SELECT MISSION</div>
+    <div class="scene-sub" id="scene-sub">CHOOSE A CRISIS SCENARIO · AI AGENT WILL RESPOND</div>
   </div>
+
+  <!-- Live stats strip (shown during/after run) -->
+  <div class="stat-strip" id="stat-strip" style="display:none">
+    <div class="stat-item"><div class="stat-lbl">Battery</div><div class="stat-val" id="ls-bat">—</div></div>
+    <div class="stat-item"><div class="stat-lbl">Thermal</div><div class="stat-val" id="ls-temp">—</div></div>
+    <div class="stat-item"><div class="stat-lbl">Comms</div><div class="stat-val" id="ls-comms">—</div></div>
+    <div class="stat-item"><div class="stat-lbl">Phase</div><div class="stat-val" id="ls-phase">—</div></div>
+    <div class="stat-item"><div class="stat-lbl">Dominant fault</div><div class="stat-val" id="ls-dom" style="font-size:9px">—</div></div>
+  </div>
+
+  <!-- Task cards -->
+  <div class="task-grid">
+    <div class="task-card sel-easy" id="tc-easy" onclick="selectTask('easy')">
+      <div class="t-icon">🟢</div>
+      <div class="t-name">EASY</div>
+      <div class="t-desc">EPS Crisis<br>Single fault · Sunlit</div>
+      <div class="t-tags">
+        <span class="ttag ttag-c">SOC 38%</span>
+        <span class="ttag ttag-c">1 FAULT</span>
+        <span class="ttag ttag-c">MPPT</span>
+      </div>
+    </div>
+    <div class="task-card" id="tc-medium" onclick="selectTask('medium')">
+      <div class="t-icon">🟡</div>
+      <div class="t-name">MEDIUM</div>
+      <div class="t-desc">Thermal + Science<br>Dual fault · Tradeoff</div>
+      <div class="t-tags">
+        <span class="ttag ttag-a">68°C</span>
+        <span class="ttag ttag-a">2 FAULTS</span>
+        <span class="ttag ttag-a">+0.12 BONUS</span>
+      </div>
+    </div>
+    <div class="task-card" id="tc-hard" onclick="selectTask('hard')">
+      <div class="t-icon">🔴</div>
+      <div class="t-name">HARD</div>
+      <div class="t-desc">Cascade Failure<br>Eclipse · 7 faults</div>
+      <div class="t-tags">
+        <span class="ttag ttag-r">SOC 22%</span>
+        <span class="ttag ttag-r">ECLIPSE</span>
+        <span class="ttag ttag-r">7 FAULTS</span>
+      </div>
+    </div>
+  </div>
+
+  <button class="launch-btn" id="launch-btn" onclick="launchMission()">▶ LAUNCH MISSION</button>
+</div>
+
+<!-- RIGHT -->
+<div class="right">
+  <!-- Score bar -->
+  <div class="score-bar">
+    <div class="score-cell"><div class="sc-lbl">AVG REWARD</div><div class="sc-val" id="sc-avg">—</div></div>
+    <div class="score-cell"><div class="sc-lbl">STEPS</div><div class="sc-val" id="sc-steps">—</div></div>
+    <div class="score-cell"><div class="sc-lbl">MISSION STATUS</div><div class="sc-val" id="sc-status">—</div></div>
+  </div>
+
+  <!-- Chart -->
+  <div class="chart-wrap">
+    <div class="chart-lbl">REWARD TIMELINE — AGENT PERFORMANCE</div>
+    <svg class="rchart" viewBox="0 0 460 56" preserveAspectRatio="none">
+      <defs>
+        <linearGradient id="rgrad" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stop-color="rgba(0,212,255,.25)"/>
+          <stop offset="100%" stop-color="rgba(0,212,255,0)"/>
+        </linearGradient>
+      </defs>
+      <line x1="0" y1="40" x2="460" y2="40" stroke="rgba(255,184,0,.2)" stroke-width="1" stroke-dasharray="3"/>
+      <text x="4" y="38" font-size="8" fill="rgba(255,184,0,.4)" font-family="Space Mono,monospace">0.45</text>
+      <path id="chart-area" fill="url(#rgrad)" d=""/>
+      <polyline id="chart-line" fill="none" stroke="#00d4ff" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" points=""/>
+    </svg>
+  </div>
+
+  <!-- World model ticker -->
+  <div class="wm-ticker" id="wm-ticker">WORLD MODEL — <span>awaiting mission launch</span></div>
+
+  <!-- Feed / Idle -->
+  <div class="feed-wrap" id="feed-wrap">
+    <div class="idle" id="idle-el">
+      <div class="idle-icon">🛰️</div>
+      <div class="idle-txt">
+        SELECT A MISSION SCENARIO ABOVE<br>
+        THE MULTI-AGENT AI WILL EXECUTE 12 DECISION STEPS<br><br>
+        COMMANDER → EPS · THERMAL · COMMS SPECIALISTS<br>
+        WORLD MODEL: 13-FAULT BELIEF STATE PER STEP<br>
+        LONG-HORIZON: 36-STEP EXTENDED MISSION MODE
+      </div>
+      <div class="idle-hint">THEME 3: WORLD MODELING · THEME 2: LONG-HORIZON PLANNING</div>
+    </div>
+  </div>
+
+  <!-- Verdict -->
+  <div class="verdict" id="verdict">
+    <div class="vd-title">MISSION DEBRIEF</div>
+    <div class="vd-grid">
+      <div class="vd-cell"><div class="vd-lbl">TASK</div><div class="vd-val" id="vd-task" style="color:var(--cyan)">—</div></div>
+      <div class="vd-cell"><div class="vd-lbl">AVG REWARD</div><div class="vd-val" id="vd-avg">—</div></div>
+      <div class="vd-cell"><div class="vd-lbl">STEPS TAKEN</div><div class="vd-val" style="color:var(--cyan)" id="vd-steps">—</div></div>
+      <div class="vd-cell"><div class="vd-lbl">FINAL STATUS</div><div class="vd-val" id="vd-fin">—</div></div>
+    </div>
+  </div>
+</div>
 </main>
 </div>
 
 <script>
-let selectedTask = 'easy';
-let running = false;
+// ── Stars ──────────────────────────────────────────────────────────────────────
+(function(){
+  const c=document.getElementById('stars');
+  for(let i=0;i<120;i++){
+    const s=document.createElement('div');
+    s.className='star';
+    const sz=Math.random()<.85?1:Math.random()<.7?1.5:2;
+    s.style.cssText=`width:${sz}px;height:${sz}px;left:${Math.random()*100}%;top:${Math.random()*100}%;`+
+      `--d:${2+Math.random()*4}s;--delay:${Math.random()*4}s;`+
+      `--min:${.05+Math.random()*.1};--max:${.4+Math.random()*.6}`;
+    c.appendChild(s);
+  }
+})();
 
-const ACTION_ICONS = {
-  rotate_to_sun:    {icon:'☀️', color:'#00d4ff'},
-  disable_payload:  {icon:'📦', color:'#8b5cf6'},
-  reboot_comms:     {icon:'📡', color:'#00d4ff'},
-  enter_safe_mode:  {icon:'🛡️', color:'#ff3d3d'},
-  switch_power_bus: {icon:'🔋', color:'#00ff88'},
-  noop:             {icon:'⏸️', color:'#3a5568'},
-};
+// ── State ──────────────────────────────────────────────────────────────────────
+let selTask='easy', running=false;
+const rewards=[];
 
-function selectTask(task, el) {
-  selectedTask = task;
-  document.querySelectorAll('.task-card').forEach(c => c.classList.remove('selected'));
-  el.classList.add('selected');
-  // Update satellite visual
-  const glow = document.getElementById('sat-glow');
-  const sub  = document.getElementById('scene-sub');
-  glow.className = 'sat-glow';
-  if (task === 'hard') {
-    glow.classList.add('critical');
-    sub.textContent = 'ECLIPSE · 7 FAULTS · BATTERY 22% · GS BLACKOUT';
-    document.getElementById('sat-wrapper').classList.add('crisis');
-    document.getElementById('sat-signal').style.display = 'none';
-    document.getElementById('panel-left').classList.add('misaligned');
-    document.getElementById('panel-right').classList.add('misaligned');
-  } else if (task === 'medium') {
-    glow.classList.add('warning');
-    sub.textContent = 'THERMAL CRISIS · 2 FAULTS · SCIENCE WINDOW ACTIVE';
-    document.getElementById('sat-wrapper').classList.remove('crisis');
-    document.getElementById('sat-signal').style.display = '';
-    document.getElementById('panel-left').classList.remove('misaligned');
-    document.getElementById('panel-right').classList.remove('misaligned');
+const ICONS={rotate_to_sun:'☀️',disable_payload:'📦',reboot_comms:'📡',enter_safe_mode:'🛡️',switch_power_bus:'🔋',noop:'⏸️'};
+const SPEC_COLORS={EPS_Specialist:'rgba(0,212,255,.25)',Thermal_Specialist:'rgba(168,85,247,.25)',Comms_Specialist:'rgba(0,255,136,.2)'};
+const SPEC_BORDER={EPS_Specialist:'rgba(0,212,255,.5)',Thermal_Specialist:'rgba(168,85,247,.5)',Comms_Specialist:'rgba(0,255,136,.4)'};
+
+function rColor(r){return r>=.7?'var(--green)':r>=.5?'var(--cyan)':r>=.35?'var(--amber)':'var(--red)'}
+function rClass(r){return r>=.7?'lv-high':r>=.5?'lv-mid':r>=.35?'lv-low':'lv-crit'}
+function fColor(p){return p>.7?'var(--red)':p>.4?'var(--amber)':'var(--cyan)'}
+function statusColor(st){const s=(st||'').toLowerCase();return s==='critical'?'var(--red)':s==='warning'?'var(--amber)':'var(--green)'}
+
+function selectTask(task){
+  selTask=task;
+  ['easy','medium','hard'].forEach(t=>{
+    const el=document.getElementById('tc-'+t);
+    el.className='task-card'+(t===task?' sel-'+t:'');
+  });
+  // Satellite visual changes
+  const glow=document.getElementById('sat-glow');
+  const orbit=document.getElementById('sat-orbit');
+  const sig=document.getElementById('sig-ring');
+  const wl=document.getElementById('wing-l');
+  const wr=document.getElementById('wing-r');
+  const sub=document.getElementById('scene-sub');
+  glow.className='sat-glow';
+  orbit.className='sat-orbit';
+  wl.classList.remove('mis'); wr.classList.remove('mis');
+  sig.style.display='';
+  if(task==='hard'){
+    glow.classList.add('crit');
+    orbit.classList.add('fast');
+    wl.classList.add('mis'); wr.classList.add('mis');
+    sig.style.display='none';
+    sub.textContent='ECLIPSE · 7 FAULTS · SOC 22% · GS BLACKOUT · RADIATION ZONE';
+  } else if(task==='medium'){
+    glow.classList.add('warn');
+    sub.textContent='THERMAL CRISIS · 2 FAULTS · PAYLOAD TEMP 68°C · SCIENCE WINDOW ACTIVE';
   } else {
-    sub.textContent = 'EPS CRISIS · 1 FAULT · MPPT STUCK';
-    document.getElementById('sat-wrapper').classList.remove('crisis');
-    document.getElementById('sat-signal').style.display = '';
-    document.getElementById('panel-left').classList.remove('misaligned');
-    document.getElementById('panel-right').classList.remove('misaligned');
+    sub.textContent='EPS CRISIS · 1 FAULT (MPPT STUCK) · SOC 38% · SUNLIT';
   }
 }
 
-function faultColor(p) {
-  return p > 0.7 ? '#ff3d3d' : p > 0.4 ? '#ffb800' : '#00d4ff';
-}
-
-function rewardClass(r) {
-  return r >= 0.7 ? 'high' : r >= 0.5 ? 'mid' : r >= 0.35 ? 'low' : 'crit';
-}
-
-function rewardColor(r) {
-  return r >= 0.7 ? '#00ff88' : r >= 0.5 ? '#00d4ff' : r >= 0.35 ? '#ffb800' : '#ff3d3d';
-}
-
-function statusColor(st) {
-  const s = (st||'').toLowerCase();
-  return s === 'critical' ? 'red' : s === 'warning' ? 'amber' : 'green';
-}
-
-function buildFaultBars(beliefs) {
-  if (!beliefs) return '';
-  const sorted = Object.entries(beliefs).sort((a,b)=>b[1]-a[1]).slice(0, 5);
-  return `<div class="fault-mini">` + sorted.map(([name, prob]) =>
-    `<div class="fault-mini-row">
-      <span class="fault-mini-name">${name}</span>
-      <div class="fault-mini-bar"><div class="fault-mini-fill" style="width:${(prob*100).toFixed(0)}%;background:${faultColor(prob)}"></div></div>
-      <span class="fault-mini-pct" style="color:${faultColor(prob)}">${Math.round(prob*100)}%</span>
-    </div>`).join('') + `</div>`;
-}
-
-function updateChart(rewards) {
-  if (!rewards.length) return;
-  const W = 460, H = 64, pad = 4;
-  const n = rewards.length;
-  const pts = rewards.map((r, i) => {
-    const x = n === 1 ? W/2 : (i / (n-1)) * W;
-    const y = H - pad - (Math.max(0, Math.min(1, r)) * (H - pad*2));
-    return [x.toFixed(1), y.toFixed(1)];
+function updateChart(){
+  if(!rewards.length)return;
+  const W=460,H=56,pad=4,n=rewards.length;
+  const pts=rewards.map((r,i)=>{
+    const x=n===1?W/2:(i/(n-1))*W;
+    const y=H-pad-(Math.max(0,Math.min(1,r))*(H-pad*2));
+    return [x.toFixed(1),y.toFixed(1)];
   });
-  const line = pts.map(p => p.join(',')).join(' ');
-  const area = `M${pts[0][0]},${H} ` + pts.map(p => `L${p[0]},${p[1]}`).join(' ') + ` L${pts[pts.length-1][0]},${H} Z`;
-  document.getElementById('chart-line').setAttribute('points', line);
-  document.getElementById('chart-area').setAttribute('d', area);
+  const line=pts.map(p=>p.join(',')).join(' ');
+  const area=`M${pts[0][0]},${H} `+pts.map(p=>`L${p[0]},${p[1]}`).join(' ')+` L${pts[pts.length-1][0]},${H} Z`;
+  document.getElementById('chart-line').setAttribute('points',line);
+  document.getElementById('chart-area').setAttribute('d',area);
 }
 
-async function launchMission() {
-  if (running) return;
-  running = true;
+function buildFaultBars(beliefs){
+  if(!beliefs)return'';
+  const top=Object.entries(beliefs).sort((a,b)=>b[1]-a[1]).slice(0,5);
+  return`<div class="fbars">`+top.map(([n,p])=>
+    `<div class="fbar-row">
+      <span class="fn">${n}</span>
+      <div class="fb"><div class="ff" style="width:${(p*100).toFixed(0)}%;background:${fColor(p)}"></div></div>
+      <span class="fp" style="color:${fColor(p)}">${Math.round(p*100)}%</span>
+    </div>`).join('')+`</div>`;
+}
 
-  const btn  = document.getElementById('launch-btn');
-  const feed = document.getElementById('step-feed');
-  const idle = document.getElementById('idle-msg');
+function buildSpecs(specs){
+  if(!specs)return'';
+  return`<div class="specs">`+Object.entries(specs).map(([name,s])=>{
+    const short=name.replace('_Specialist','');
+    const bg=SPEC_COLORS[name]||'rgba(255,255,255,.05)';
+    const bc=SPEC_BORDER[name]||'rgba(255,255,255,.15)';
+    return`<span class="spec-pill" style="background:${bg};border-color:${bc};color:var(--text)">${short}: ${s.action} (${Math.round(s.confidence*100)}%)</span>`;
+  }).join('')+`</div>`;
+}
 
-  btn.textContent = '⟳ EXECUTING...';
-  btn.className = 'launch-btn running';
-  btn.disabled = true;
+async function launchMission(){
+  if(running)return;
+  running=true;
+  rewards.length=0;
 
-  // Reset UI
-  feed.innerHTML = '';
-  feed.style.display = 'flex';
-  idle.style.display = 'none';
-  document.getElementById('verdict').classList.remove('visible');
-  document.getElementById('sc-avg').textContent   = '—';
-  document.getElementById('sc-steps').textContent = '—';
-  document.getElementById('sc-status').textContent= '—';
-  document.getElementById('sc-avg').className = 'score-value cyan';
-  document.getElementById('sc-status').className = 'score-value cyan';
+  const btn=document.getElementById('launch-btn');
+  const feed=document.getElementById('feed-wrap');
+  btn.textContent='⟳ EXECUTING...';
+  btn.className='launch-btn running';
+  btn.disabled=true;
+
+  // Reset right panel
+  feed.innerHTML='';
+  document.getElementById('idle-el')&&(document.getElementById('idle-el').style.display='none');
+  document.getElementById('verdict').classList.remove('show');
+  document.getElementById('sc-avg').textContent='—';
+  document.getElementById('sc-steps').textContent='—';
+  document.getElementById('sc-status').textContent='—';
+  document.getElementById('sc-avg').className='sc-val';
+  document.getElementById('sc-status').className='sc-val';
   document.getElementById('chart-line').setAttribute('points','');
   document.getElementById('chart-area').setAttribute('d','');
+  document.getElementById('wm-ticker').innerHTML='WORLD MODEL — <span style="color:var(--amber)">MISSION IN PROGRESS...</span>';
+  document.getElementById('stat-strip').style.display='flex';
 
-  try {
-    const res  = await fetch('/run_episode', {
-      method: 'POST',
-      headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({task_id: selectedTask})
+  try{
+    const res=await fetch('/run_episode',{
+      method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({task_id:selTask})
     });
-    const data = await res.json();
-    const rewards = data.steps.map(s => s.reward);
+    if(!res.ok){
+      const txt=await res.text();
+      throw new Error(`Server error ${res.status}: ${txt.slice(0,120)}`);
+    }
+    const data=await res.json();
+    if(data.error){throw new Error(data.error+': '+data.detail)}
 
-    // Animate steps in with delay
-    for (let i = 0; i < data.steps.length; i++) {
-      await new Promise(r => setTimeout(r, 120));
-      const s    = data.steps[i];
-      const ai   = ACTION_ICONS[s.action] || {icon:'⚡',color:'#00d4ff'};
-      const cls  = rewardClass(s.reward);
-      const col  = rewardColor(s.reward);
-      const t    = s.telemetry || {};
-      const wm   = s.world_model || {};
-      const sunlit = t.sunlit !== undefined ? t.sunlit : true;
+    for(let i=0;i<data.steps.length;i++){
+      await new Promise(r=>setTimeout(r,110));
+      const s=data.steps[i];
+      const t=s.telemetry||{};
+      const wm=s.world_model||{};
+      const icon=ICONS[s.action]||'⚡';
+      const cls=rClass(s.reward);
+      const col=rColor(s.reward);
 
-      const el = document.createElement('div');
-      el.className = `step-item ${cls}`;
-      el.style.animationDelay = '0ms';
-      el.innerHTML = `
-        <div class="step-num">${String(s.step).padStart(2,'0')}</div>
-        <div class="step-body">
-          <div class="step-action">${ai.icon} ${s.action.toUpperCase()}</div>
-          <div class="step-rationale">${s.rationale}</div>
-          <div class="step-tele">
-            BAT ${t.battery_soc}% · SOL ${t.solar_efficiency}% · TEMP ${t.thermal_temp}°C · COMMS ${t.comms_signal}%
-            ${!sunlit ? ' · <span style="color:#ffb800">ECLIPSE</span>' : ''}
-            · <span style="color:${t.mission_status==='critical'?'#ff3d3d':t.mission_status==='warning'?'#ffb800':'#00ff88'}">${(t.mission_status||'stable').toUpperCase()}</span>
-          </div>
-          ${buildFaultBars(wm.fault_beliefs)}
-        </div>
-        <div class="step-reward" style="color:${col}">${s.reward.toFixed(3)}</div>`;
+      // Update left live stats
+      document.getElementById('ls-bat').textContent=t.battery_soc+'%';
+      document.getElementById('ls-bat').style.color=t.battery_soc<20?'var(--red)':t.battery_soc<40?'var(--amber)':'var(--cyan)';
+      document.getElementById('ls-temp').textContent=t.thermal_temp+'°C';
+      document.getElementById('ls-temp').style.color=t.thermal_temp>85?'var(--red)':t.thermal_temp>70?'var(--amber)':'var(--cyan)';
+      document.getElementById('ls-comms').textContent=t.comms_signal+'%';
+      document.getElementById('ls-comms').style.color=t.comms_signal<30?'var(--red)':t.comms_signal<60?'var(--amber)':'var(--cyan)';
+      document.getElementById('ls-phase').textContent='P'+(wm.phase+1)+'/3';
+      document.getElementById('ls-dom').textContent=(wm.dominant_subsystem||'—').toUpperCase();
+
+      // Update satellite glow based on status
+      const glow=document.getElementById('sat-glow');
+      if(t.mission_status==='critical'){glow.className='sat-glow crit'}
+      else if(t.mission_status==='warning'){glow.className='sat-glow warn'}
+      else{glow.className='sat-glow'}
+
+      // World model ticker
+      document.getElementById('wm-ticker').innerHTML=
+        `WORLD MODEL — Dominant: <span>${(wm.dominant_subsystem||'?').toUpperCase()}</span> &nbsp;|&nbsp; `+
+        `Top faults: <span>${wm.top_faults||'—'}</span> &nbsp;|&nbsp; `+
+        `Phase: <span>${wm.phase+1}/3</span>`+
+        (!t.sunlit?' &nbsp;|&nbsp; <span style="color:var(--amber)">🌑 ECLIPSE</span>':'')+
+        (!t.gs_visible?' &nbsp;|&nbsp; <span style="color:var(--red)">GS BLACKOUT</span>':'');
+
+      // Add step card
+      const el=document.createElement('div');
+      el.className=`step-card ${cls}`;
+      el.innerHTML=
+        `<div class="sn">${String(s.step).padStart(2,'0')}</div>`+
+        `<div class="sb">`+
+          `<div class="sa">${icon} ${s.action.toUpperCase()}</div>`+
+          `<div class="sr-text">${s.rationale}</div>`+
+          `<div class="st">BAT ${t.battery_soc}% · TEMP ${t.thermal_temp}°C · COMMS ${t.comms_signal}%`+
+          `${!t.sunlit?' · <span style="color:var(--amber)">ECLIPSE</span>':''}`+
+          `${t.safe_mode?' · <span style="color:var(--red)">SAFE MODE</span>':''}`+
+          ` · <span style="color:${statusColor(t.mission_status)}">${(t.mission_status||'stable').toUpperCase()}</span></div>`+
+          buildFaultBars(wm.fault_beliefs)+
+          buildSpecs(s.specialists)+
+        `</div>`+
+        `<div class="srw" style="color:${col}">${s.reward.toFixed(3)}</div>`;
       feed.appendChild(el);
-      feed.scrollTop = feed.scrollHeight;
+      feed.scrollTop=feed.scrollHeight;
 
-      // Update live scores
-      const sofar = rewards.slice(0, i+1);
-      const avg = sofar.reduce((a,b)=>a+b,0)/sofar.length;
-      document.getElementById('sc-avg').textContent   = avg.toFixed(3);
-      document.getElementById('sc-steps').textContent = `${i+1}/${data.steps.length}`;
-      document.getElementById('sc-status').textContent = (t.mission_status||'stable').toUpperCase();
-      document.getElementById('sc-avg').className    = `score-value ${rewardClass(avg)==='high'?'green':rewardClass(avg)==='mid'?'cyan':'amber'}`;
-      document.getElementById('sc-status').className = `score-value ${statusColor(t.mission_status)}`;
-      updateChart(sofar);
+      // Update score bar
+      rewards.push(s.reward);
+      const avg=rewards.reduce((a,b)=>a+b,0)/rewards.length;
+      document.getElementById('sc-avg').textContent=avg.toFixed(3);
+      document.getElementById('sc-avg').className='sc-val '+(avg>=.7?'green':avg>=.5?'':'amber');
+      document.getElementById('sc-steps').textContent=`${i+1} / ${data.steps.length}`;
+      document.getElementById('sc-status').textContent=(t.mission_status||'stable').toUpperCase();
+      document.getElementById('sc-status').className='sc-val '+(t.mission_status==='critical'?'red':t.mission_status==='warning'?'amber':'green');
+      updateChart();
     }
 
     // Verdict
-    const finalAvg = rewards.reduce((a,b)=>a+b,0)/rewards.length;
-    document.getElementById('vd-task').textContent  = data.task_id.toUpperCase();
-    document.getElementById('vd-avg').textContent   = finalAvg.toFixed(4);
-    document.getElementById('vd-avg').style.color   = rewardColor(finalAvg);
-    document.getElementById('vd-steps').textContent = data.total_steps;
-    document.getElementById('vd-status').textContent= (data.final_status||'stable').toUpperCase();
-    document.getElementById('vd-status').style.color= statusColor(data.final_status)==='green'?'#00ff88':statusColor(data.final_status)==='amber'?'#ffb800':'#ff3d3d';
-    document.getElementById('verdict').classList.add('visible');
-    updateChart(rewards);
+    const finalAvg=rewards.reduce((a,b)=>a+b,0)/rewards.length;
+    document.getElementById('vd-task').textContent=data.task_id.toUpperCase();
+    document.getElementById('vd-avg').textContent=finalAvg.toFixed(4);
+    document.getElementById('vd-avg').style.color=rColor(finalAvg);
+    document.getElementById('vd-steps').textContent=data.total_steps;
+    document.getElementById('vd-fin').textContent=(data.final_status||'stable').toUpperCase();
+    document.getElementById('vd-fin').style.color=statusColor(data.final_status);
+    document.getElementById('verdict').classList.add('show');
+    document.getElementById('wm-ticker').innerHTML='WORLD MODEL — <span style="color:var(--green)">MISSION COMPLETE · AVG REWARD: '+finalAvg.toFixed(4)+'</span>';
 
-  } catch(e) {
-    const el = document.createElement('div');
-    el.style.cssText='color:#ff3d3d;padding:16px;font-size:11px';
-    el.textContent = 'Error: ' + e.message;
+  }catch(e){
+    const el=document.createElement('div');
+    el.style.cssText='color:var(--red);padding:16px;font-size:11px;background:rgba(255,61,61,.08);border:1px solid rgba(255,61,61,.2);border-radius:3px;margin:8px';
+    el.textContent='Error: '+e.message;
     feed.appendChild(el);
   }
 
-  running = false;
-  btn.textContent = '▶ RUN AGAIN';
-  btn.className = 'launch-btn';
-  btn.disabled = false;
+  running=false;
+  btn.textContent='▶ RUN AGAIN';
+  btn.className='launch-btn';
+  btn.disabled=false;
 }
 </script>
 </body>
