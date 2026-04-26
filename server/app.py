@@ -41,7 +41,100 @@ def _world_model(obs):
     }
 
 
-# ── /reset override — creates a fresh env per request (OpenEnv pattern) ───────
+# ── Custom state applicator ───────────────────────────────────────────────────
+# Applies user-supplied fields directly onto a freshly-reset env instance.
+# Only modifies what the user explicitly passed — everything else stays at the
+# task's default. Zero risk to existing task logic.
+_VALID_FAULTS = {
+    "mppt_stuck", "panel_deployment_jam", "bus_short_transient", "battery_aging",
+    "reaction_wheel_saturation", "gyro_drift", "star_tracker_dropout",
+    "radiator_valve_stuck", "heat_pipe_failure", "heater_relay_latch",
+    "transponder_overheating", "amplifier_degradation", "antenna_gimbal_stall",
+}
+
+def _apply_custom_state(env: OrbitalAnomalyOpenenvEnvironment, custom: dict) -> None:
+    """Overlay user-chosen conditions onto a freshly-reset env, then disable
+    the 3-phase extended mission so phase anomalies don't overwrite them."""
+
+    # Tier 1 — Numeric telemetry fields (sliders)
+    numeric_fields = {
+        "battery_soc":         (0.0,   100.0),
+        "payload_temp":        (-20.0, 120.0),
+        "thermal_temp":        (-20.0, 120.0),   # alias → payload_temp
+        "comms_signal":        (0.0,   1.0),      # handled specially below
+        "solar_efficiency":    (0.0,   1.0),      # → sun_vector_alignment
+        "attitude_error_deg":  (0.0,   90.0),
+        "wheel_saturation_level": (0.0, 1.0),
+        "radiator_efficiency": (0.0,   1.0),
+        "bus_voltage":         (18.0,  28.5),
+        "panel_health":        (0.0,   1.0),
+        "bit_error_rate":      (0.001, 0.9),
+        "packet_loss_ratio":   (0.001, 0.9),
+        "transmitter_power":   (0.0,   5.0),
+        "antenna_pointing_error": (0.0, 90.0),
+        "uplink_margin":       (-99.0, 15.0),
+    }
+
+    for key, (lo, hi) in numeric_fields.items():
+        if key not in custom:
+            continue
+        try:
+            val = float(custom[key])
+            val = max(lo, min(hi, val))
+        except (TypeError, ValueError):
+            continue
+
+        # Friendly aliases
+        if key == "thermal_temp":
+            env.payload_temp = val
+        elif key == "solar_efficiency":
+            # solar_efficiency = sun_vector * panel_health; keep panel_health
+            env.sun_vector_alignment = max(0.0, min(1.0,
+                val / max(0.01, env.panel_health)))
+        elif key == "comms_signal":
+            # comms_signal = 1 - BER*5 - PLR; derive a matching BER
+            # keep PLR at its current value, adjust BER
+            target_comms = max(0.0, min(1.0, val))
+            env.bit_error_rate = max(0.001, min(0.9,
+                (1.0 - target_comms - env.packet_loss_ratio) / 5.0))
+        else:
+            setattr(env, key, val)
+
+    # Tier 2 — Boolean orbital context (toggles)
+    bool_fields = {
+        "sunlit":                   "sunlit",
+        "ground_station_visible":   "ground_station_visible",
+        "observation_window_active":"observation_window_active",
+        "radiation_zone":           "radiation_zone",
+        "payload_on":               "payload_on",
+        "safe_mode":                "safe_mode",
+        "power_bus_redundancy":     "power_bus_redundancy",
+    }
+    # "eclipse" is a friendly alias for sunlit=False
+    if "eclipse" in custom:
+        env.sunlit = not bool(custom["eclipse"])
+        if not env.sunlit:
+            env.eclipse_timer = 1
+
+    for key, attr in bool_fields.items():
+        if key in custom:
+            setattr(env, attr, bool(custom[key]))
+
+    # Tier 3 — Fault injection (list of fault name strings)
+    if "faults" in custom:
+        raw_faults = custom["faults"]
+        if isinstance(raw_faults, (list, tuple)):
+            valid = {f for f in raw_faults if f in _VALID_FAULTS}
+            env._faults = valid
+            env._fault_timers = {f: 0 for f in valid}
+
+    # Disable extended mission so phases don't inject new anomalies
+    # and overwrite the user's chosen starting conditions mid-episode
+    env._extended_mission = False
+    env.task_id = "custom"
+
+
+# ── /reset override ────────────────────────────────────────────────────────────
 @app.post("/reset", include_in_schema=False)
 async def reset_with_task(request: Request) -> JSONResponse:
     try:
@@ -49,7 +142,6 @@ async def reset_with_task(request: Request) -> JSONResponse:
     except Exception:
         body = {}
     task_id = body.get("task_id") if isinstance(body, dict) else None
-    # KEY FIX: instantiate directly — OpenEnv never stores env on app.state
     env = OrbitalAnomalyOpenenvEnvironment()
     obs = env.reset(task_id=task_id)
     return JSONResponse({"observation": obs.model_dump(),
@@ -57,7 +149,7 @@ async def reset_with_task(request: Request) -> JSONResponse:
                          "world_model": _world_model(obs)})
 
 
-# ── /step override — stateless, creates fresh env ─────────────────────────────
+# ── /step override ─────────────────────────────────────────────────────────────
 @app.post("/step", include_in_schema=False)
 async def step_with_rationale(request: Request) -> JSONResponse:
     try:
@@ -65,7 +157,6 @@ async def step_with_rationale(request: Request) -> JSONResponse:
     except Exception:
         body = {}
     action_type = body.get("action_type", "noop") if isinstance(body, dict) else "noop"
-    # KEY FIX: same pattern — fresh env
     env = OrbitalAnomalyOpenenvEnvironment()
     obs = env.step(OrbitalAnomalyOpenenvAction(action_type=action_type))
     action_rec, rationale, recs = mission_commander_decide(obs)
@@ -83,6 +174,154 @@ async def step_with_rationale(request: Request) -> JSONResponse:
     })
 
 
+# ── Shared episode runner (used by both /run_episode and /run_custom) ──────────
+def _run_episode_steps(env: OrbitalAnomalyOpenenvEnvironment, obs,
+                       task_label: str, max_steps: int = 12):
+    steps = []
+    total_reward = 0.0
+
+    def safe_heuristic(o):
+        try:
+            bat    = float(o.battery_soc or 50)
+            sol    = float(o.solar_efficiency or 0.5)
+            temp   = float(o.thermal_temp or 40)
+            ber    = float(o.bit_error_rate or 0.01)
+            plr    = float(o.packet_loss_ratio or 0.05)
+            comms  = max(0.0, min(1.0, 1.0 - ber * 5.0 - plr))
+            sunlit = bool(getattr(o, "sunlit", True))
+            payl   = bool(o.payload_on) if o.payload_on is not None else True
+            if bat < 12:                          return "switch_power_bus", "[EPS|99%] CRITICAL: battery at floor"
+            if bat < 30 and not sunlit:           return "switch_power_bus", "[EPS|94%] Eclipse + low battery — solar useless"
+            if bat < 20 and sol < 0.35:           return "rotate_to_sun",   "[EPS|91%] CRITICAL: battery low, solar misaligned"
+            if temp > 84:                         return "enter_safe_mode",  "[Thermal|98%] CRITICAL: thermal cascade imminent"
+            if temp > 74 and payl:                return "disable_payload",  "[Thermal|91%] CRITICAL: payload heat critical"
+            if bat < 38 and not sunlit:           return "switch_power_bus", "[EPS|82%] Eclipse: activate power reserve"
+            if bat < 35:                          return "rotate_to_sun",    "[EPS|78%] Battery warning — realign solar"
+            if comms < 0.22 and bat > 25:         return "reboot_comms",     "[Comms|97%] CRITICAL: link near loss"
+            if sol < 0.42 and sunlit:             return "rotate_to_sun",    "[EPS|65%] Solar suboptimal — realign"
+            if comms < 0.50:                      return "reboot_comms",     "[Comms|55%] Comms degraded"
+            if temp > 62 and payl:                return "disable_payload",  "[Thermal|58%] Proactive thermal management"
+            if sol < 0.70 and sunlit:             return "rotate_to_sun",    "[EPS|40%] Solar improvement possible"
+            return "noop", "[Commander] All systems nominal"
+        except Exception:
+            return "noop", "[Commander] Heuristic error — holding"
+
+    def safe_beliefs(o):
+        try:
+            b = max(0.0, min(1.0, float(o.battery_soc or 50) / 100.0))
+            s = max(0.0, min(1.0, float(o.solar_efficiency or 0.5)))
+            t = max(0.0, min(1.0, (float(o.thermal_temp or 40) - 20) / 80))
+            c = max(0.0, min(1.0, float(o.comms_signal or 0.5)))
+            w = max(0.0, min(1.0, float(o.wheel_saturation_level or 0.0)))
+            r = max(0.0, min(1.0, 1.0 - float(o.radiator_efficiency or 1.0)))
+            clip = lambda x: round(max(0.0, min(1.0, x)), 3)
+            return {
+                "mppt_stuck":               clip((1-s)*0.9 + (1-b)*0.3),
+                "panel_deployment_jam":     clip((1-s)*0.8),
+                "bus_short_transient":      clip((1-b)*0.6 + t*0.2),
+                "battery_aging":            clip((1-b)*0.5),
+                "reaction_wheel_saturation":clip(w*0.9 + (1-s)*0.2),
+                "gyro_drift":               clip((1-s)*0.35 + w*0.1),
+                "star_tracker_dropout":     clip((1-s)*0.4),
+                "radiator_valve_stuck":     clip(r*0.7 + t*0.5),
+                "heat_pipe_failure":        clip(t*0.75 + (1-b)*0.1),
+                "heater_relay_latch":       clip(t*0.5 + (1-b)*0.2),
+                "transponder_overheating":  clip((1-c)*0.8 + t*0.3),
+                "amplifier_degradation":    clip((1-c)*0.65),
+                "antenna_gimbal_stall":     clip((1-c)*0.55 + (1-s)*0.15),
+            }
+        except Exception:
+            return {}
+
+    def safe_dom(beliefs):
+        try:
+            groups = {
+                "EPS":     ["mppt_stuck","panel_deployment_jam","bus_short_transient","battery_aging"],
+                "ADCS":    ["reaction_wheel_saturation","gyro_drift","star_tracker_dropout"],
+                "Thermal": ["radiator_valve_stuck","heat_pipe_failure","heater_relay_latch"],
+                "Comms":   ["transponder_overheating","amplifier_degradation","antenna_gimbal_stall"],
+            }
+            scores = {g: sum(beliefs.get(f,0) for f in fs)/len(fs) for g,fs in groups.items()}
+            return max(scores, key=scores.get)
+        except Exception:
+            return "EPS"
+
+    def sf(val, default=0.0):
+        try: return round(float(val or default), 1)
+        except: return round(default, 1)
+
+    for step_num in range(max_steps):
+        if bool(obs.done):
+            break
+
+        action, rationale = safe_heuristic(obs)
+
+        try:
+            _, _, spec_recs = mission_commander_decide(obs)
+            specialists = {
+                n: {"action": r[0], "confidence": round(r[1], 3), "reason": r[2]}
+                for n, r in spec_recs.items()
+            }
+        except Exception:
+            specialists = {
+                "EPS_Specialist":     {"action": action, "confidence": 0.85, "reason": rationale},
+                "Thermal_Specialist": {"action": "noop", "confidence": 0.12, "reason": "Thermal nominal"},
+                "Comms_Specialist":   {"action": "noop", "confidence": 0.10, "reason": "Comms nominal"},
+            }
+
+        try:
+            obs = env.step(OrbitalAnomalyOpenenvAction(action_type=action))
+        except Exception as e:
+            print(f"[step ERROR] step={step_num} {e}", flush=True)
+            break
+
+        reward = float(obs.reward or 0.001)
+        total_reward += reward
+
+        meta2    = obs.metadata or {}
+        beliefs2 = meta2.get("fault_beliefs") or safe_beliefs(obs)
+        dom      = meta2.get("dominant_subsystem") or safe_dom(beliefs2)
+
+        steps.append({
+            "step":      step_num + 1,
+            "action":    action,
+            "rationale": rationale,
+            "reward":    round(reward, 4),
+            "done":      bool(obs.done),
+            "telemetry": {
+                "battery_soc":      sf(obs.battery_soc, 50),
+                "solar_efficiency": round(sf(obs.solar_efficiency, 0.5) * 100, 1),
+                "thermal_temp":     sf(obs.thermal_temp, 40),
+                "comms_signal":     round(sf(obs.comms_signal, 0.5) * 100, 1),
+                "sunlit":           bool(getattr(obs, "sunlit", True)),
+                "payload_on":       bool(obs.payload_on) if obs.payload_on is not None else True,
+                "safe_mode":        bool(obs.safe_mode) if obs.safe_mode is not None else False,
+                "mission_status":   str(obs.mission_status or "stable"),
+                "gs_visible":       bool(getattr(obs, "ground_station_visible", True)),
+                "attitude_error":   sf(getattr(obs, "attitude_error_deg", 0), 0),
+                "wheel_sat":        round(sf(getattr(obs, "wheel_saturation_level", 0), 0) * 100, 1),
+            },
+            "world_model": {
+                "dominant_subsystem": dom,
+                "top_faults": ", ".join(
+                    f"{k}({round(v*100)}%)"
+                    for k,v in sorted(beliefs2.items(), key=lambda x:-x[1])[:3]
+                ) if beliefs2 else "unknown",
+                "fault_beliefs": {k: round(float(v), 3) for k,v in beliefs2.items()},
+                "phase": int(meta2.get("phase", 0)),
+                "phase_step": int(meta2.get("phase_step", step_num)),
+            },
+            "specialists": specialists,
+        })
+
+        if bool(obs.done):
+            break
+
+    avg = round(total_reward / max(len(steps), 1), 4)
+    return steps, avg, obs
+
+
+# ── /run_episode ───────────────────────────────────────────────────────────────
 @app.post("/run_episode", include_in_schema=False)
 async def run_full_episode(request: Request) -> JSONResponse:
     """Run a complete autonomous episode; return all steps at once."""
@@ -95,153 +334,9 @@ async def run_full_episode(request: Request) -> JSONResponse:
         task_id = "easy"
 
     try:
-        # KEY FIX: instantiate directly — never use request.app.state.env
         env = OrbitalAnomalyOpenenvEnvironment()
         obs = env.reset(task_id=task_id)
-        steps = []
-        total_reward = 0.0
-
-        # Safe heuristic: reads from obs object
-        def safe_heuristic(o):
-            try:
-                bat    = float(o.battery_soc or 50)
-                sol    = float(o.solar_efficiency or 0.5)
-                temp   = float(o.thermal_temp or 40)
-                ber    = float(o.bit_error_rate or 0.01)
-                plr    = float(o.packet_loss_ratio or 0.05)
-                comms  = max(0.0, min(1.0, 1.0 - ber * 5.0 - plr))
-                sunlit = bool(getattr(o, "sunlit", True))
-                payl   = bool(o.payload_on) if o.payload_on is not None else True
-                if bat < 12:                          return "switch_power_bus", "[EPS|99%] CRITICAL: battery at floor"
-                if bat < 30 and not sunlit:           return "switch_power_bus", "[EPS|94%] Eclipse + low battery — solar useless"
-                if bat < 20 and sol < 0.35:           return "rotate_to_sun",   "[EPS|91%] CRITICAL: battery low, solar misaligned"
-                if temp > 84:                         return "enter_safe_mode",  "[Thermal|98%] CRITICAL: thermal cascade imminent"
-                if temp > 74 and payl:                return "disable_payload",  "[Thermal|91%] CRITICAL: payload heat critical"
-                if bat < 38 and not sunlit:           return "switch_power_bus", "[EPS|82%] Eclipse: activate power reserve"
-                if bat < 35:                          return "rotate_to_sun",    "[EPS|78%] Battery warning — realign solar"
-                if comms < 0.22 and bat > 25:         return "reboot_comms",     "[Comms|97%] CRITICAL: link near loss"
-                if sol < 0.42 and sunlit:             return "rotate_to_sun",    "[EPS|65%] Solar suboptimal — realign"
-                if comms < 0.50:                      return "reboot_comms",     "[Comms|55%] Comms degraded"
-                if temp > 62 and payl:                return "disable_payload",  "[Thermal|58%] Proactive thermal management"
-                if sol < 0.70 and sunlit:             return "rotate_to_sun",    "[EPS|40%] Solar improvement possible"
-                return "noop", "[Commander] All systems nominal"
-            except Exception:
-                return "noop", "[Commander] Heuristic error — holding"
-
-        def safe_beliefs(o):
-            try:
-                b = max(0.0, min(1.0, float(o.battery_soc or 50) / 100.0))
-                s = max(0.0, min(1.0, float(o.solar_efficiency or 0.5)))
-                t = max(0.0, min(1.0, (float(o.thermal_temp or 40) - 20) / 80))
-                c = max(0.0, min(1.0, float(o.comms_signal or 0.5)))
-                w = max(0.0, min(1.0, float(o.wheel_saturation_level or 0.0)))
-                r = max(0.0, min(1.0, 1.0 - float(o.radiator_efficiency or 1.0)))
-                clip = lambda x: round(max(0.0, min(1.0, x)), 3)
-                return {
-                    "mppt_stuck":               clip((1-s)*0.9 + (1-b)*0.3),
-                    "panel_deployment_jam":     clip((1-s)*0.8),
-                    "bus_short_transient":      clip((1-b)*0.6 + t*0.2),
-                    "battery_aging":            clip((1-b)*0.5),
-                    "reaction_wheel_saturation":clip(w*0.9 + (1-s)*0.2),
-                    "gyro_drift":               clip((1-s)*0.35 + w*0.1),
-                    "star_tracker_dropout":     clip((1-s)*0.4),
-                    "radiator_valve_stuck":     clip(r*0.7 + t*0.5),
-                    "heat_pipe_failure":        clip(t*0.75 + (1-b)*0.1),
-                    "heater_relay_latch":       clip(t*0.5 + (1-b)*0.2),
-                    "transponder_overheating":  clip((1-c)*0.8 + t*0.3),
-                    "amplifier_degradation":    clip((1-c)*0.65),
-                    "antenna_gimbal_stall":     clip((1-c)*0.55 + (1-s)*0.15),
-                }
-            except Exception:
-                return {}
-
-        def safe_dom(beliefs):
-            try:
-                groups = {
-                    "EPS":     ["mppt_stuck","panel_deployment_jam","bus_short_transient","battery_aging"],
-                    "ADCS":    ["reaction_wheel_saturation","gyro_drift","star_tracker_dropout"],
-                    "Thermal": ["radiator_valve_stuck","heat_pipe_failure","heater_relay_latch"],
-                    "Comms":   ["transponder_overheating","amplifier_degradation","antenna_gimbal_stall"],
-                }
-                scores = {g: sum(beliefs.get(f,0) for f in fs)/len(fs) for g,fs in groups.items()}
-                return max(scores, key=scores.get)
-            except Exception:
-                return "EPS"
-
-        def sf(val, default=0.0):
-            try: return round(float(val or default), 1)
-            except: return round(default, 1)
-
-        MAX_STEPS = 12
-
-        for step_num in range(MAX_STEPS):
-            if bool(obs.done):
-                break
-
-            action, rationale = safe_heuristic(obs)
-
-            try:
-                _, _, spec_recs = mission_commander_decide(obs)
-                specialists = {
-                    n: {"action": r[0], "confidence": round(r[1], 3), "reason": r[2]}
-                    for n, r in spec_recs.items()
-                }
-            except Exception:
-                specialists = {
-                    "EPS_Specialist":     {"action": action, "confidence": 0.85, "reason": rationale},
-                    "Thermal_Specialist": {"action": "noop", "confidence": 0.12, "reason": "Thermal nominal"},
-                    "Comms_Specialist":   {"action": "noop", "confidence": 0.10, "reason": "Comms nominal"},
-                }
-
-            try:
-                obs = env.step(OrbitalAnomalyOpenenvAction(action_type=action))
-            except Exception as e:
-                print(f"[step ERROR] step={step_num} {e}", flush=True)
-                break
-
-            reward = float(obs.reward or 0.001)
-            total_reward += reward
-
-            meta2    = obs.metadata or {}
-            beliefs2 = meta2.get("fault_beliefs") or safe_beliefs(obs)
-            dom      = meta2.get("dominant_subsystem") or safe_dom(beliefs2)
-
-            steps.append({
-                "step":      step_num + 1,
-                "action":    action,
-                "rationale": rationale,
-                "reward":    round(reward, 4),
-                "done":      bool(obs.done),
-                "telemetry": {
-                    "battery_soc":      sf(obs.battery_soc, 50),
-                    "solar_efficiency": round(sf(obs.solar_efficiency, 0.5) * 100, 1),
-                    "thermal_temp":     sf(obs.thermal_temp, 40),
-                    "comms_signal":     round(sf(obs.comms_signal, 0.5) * 100, 1),
-                    "sunlit":           bool(getattr(obs, "sunlit", True)),
-                    "payload_on":       bool(obs.payload_on) if obs.payload_on is not None else True,
-                    "safe_mode":        bool(obs.safe_mode) if obs.safe_mode is not None else False,
-                    "mission_status":   str(obs.mission_status or "stable"),
-                    "gs_visible":       bool(getattr(obs, "ground_station_visible", True)),
-                    "attitude_error":   sf(getattr(obs, "attitude_error_deg", 0), 0),
-                    "wheel_sat":        round(sf(getattr(obs, "wheel_saturation_level", 0), 0) * 100, 1),
-                },
-                "world_model": {
-                    "dominant_subsystem": dom,
-                    "top_faults": ", ".join(
-                        f"{k}({round(v*100)}%)"
-                        for k,v in sorted(beliefs2.items(), key=lambda x:-x[1])[:3]
-                    ) if beliefs2 else "unknown",
-                    "fault_beliefs": {k: round(float(v), 3) for k,v in beliefs2.items()},
-                    "phase": int(meta2.get("phase", 0)),
-                    "phase_step": int(meta2.get("phase_step", step_num)),
-                },
-                "specialists": specialists,
-            })
-
-            if bool(obs.done):
-                break
-
-        avg = round(total_reward / max(len(steps), 1), 4)
+        steps, avg, obs = _run_episode_steps(env, obs, task_id)
         return JSONResponse({
             "task_id":      task_id,
             "total_steps":  len(steps),
@@ -249,11 +344,73 @@ async def run_full_episode(request: Request) -> JSONResponse:
             "final_status": str(obs.mission_status or "stable"),
             "steps":        steps,
         })
-
     except Exception:
         tb = traceback.format_exc()
         print("[run_episode FATAL]", tb, flush=True)
         return JSONResponse({"error": "Episode failed", "detail": tb}, status_code=500)
+
+
+# ── /run_custom ────────────────────────────────────────────────────────────────
+@app.post("/run_custom", include_in_schema=False)
+async def run_custom_episode(request: Request) -> JSONResponse:
+    """
+    Run a 12-step episode from a user-defined starting state.
+
+    Body: {
+      "base_task":    "easy" | "medium" | "hard",   // baseline to start from
+      "battery_soc":  0-100,
+      "payload_temp": -20 to 120,
+      "solar_efficiency": 0-1,   // adjusts sun_vector_alignment
+      "comms_signal": 0-1,       // adjusts bit_error_rate
+      "attitude_error_deg": 0-90,
+      "wheel_saturation_level": 0-1,
+      "radiator_efficiency": 0-1,
+      "eclipse":      true/false,
+      "ground_station_visible": true/false,
+      "observation_window_active": true/false,
+      "radiation_zone": true/false,
+      "payload_on":   true/false,
+      "faults":       ["mppt_stuck", "radiator_valve_stuck", ...]  // any subset of 13
+    }
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+
+    if not isinstance(body, dict):
+        body = {}
+
+    base_task = body.get("base_task", "easy")
+    if base_task not in ("easy", "medium", "hard"):
+        base_task = "easy"
+
+    try:
+        env = OrbitalAnomalyOpenenvEnvironment()
+        # Reset to a base task first so all physics fields are initialised
+        obs = env.reset(task_id=base_task)
+        # Overlay user's custom conditions
+        _apply_custom_state(env, body)
+        # Build a fresh obs reflecting the overridden state (no step taken)
+        obs = env._get_observation(reward=env._safe_reward(0.45), done=False)
+
+        steps, avg, obs = _run_episode_steps(env, obs, "custom")
+
+        return JSONResponse({
+            "task_id":      "custom",
+            "base_task":    base_task,
+            "total_steps":  len(steps),
+            "avg_reward":   avg,
+            "final_status": str(obs.mission_status or "stable"),
+            "custom_state": {k: v for k, v in body.items()
+                             if k not in ("base_task",)},
+            "steps":        steps,
+        })
+
+    except Exception:
+        tb = traceback.format_exc()
+        print("[run_custom FATAL]", tb, flush=True)
+        return JSONResponse({"error": "Custom episode failed", "detail": tb}, status_code=500)
 
 
 # ── Dashboard HTML ─────────────────────────────────────────────────────────────
@@ -295,7 +452,7 @@ header{flex-shrink:0;padding:12px 24px;border-bottom:1px solid var(--border);dis
 .hlink.hl-green{border-color:rgba(0,255,136,.5);color:var(--green);text-shadow:0 0 8px rgba(0,255,136,0.3);box-shadow:0 0 6px rgba(0,255,136,0.1)}
 .hlink.hl-green:hover{border-color:var(--green);box-shadow:0 0 14px rgba(0,255,136,.3);background:rgba(0,255,136,0.06)}
 main{flex:1;display:grid;grid-template-columns:1fr 520px;min-height:0}
-.left{position:relative;display:flex;flex-direction:column;align-items:center;justify-content:center;border-right:1px solid var(--border);overflow:hidden;padding:16px 28px;gap:14px;}
+.left{position:relative;display:flex;flex-direction:column;align-items:center;justify-content:center;border-right:1px solid var(--border);overflow:hidden;overflow-y:auto;padding:16px 28px;gap:10px;}
 .left::before{content:'';position:absolute;inset:0;pointer-events:none;z-index:0;background:repeating-linear-gradient(0deg,transparent,transparent 2px,rgba(0,0,0,0.04) 2px,rgba(0,0,0,0.04) 4px);}
 .earth-wrap{position:absolute;bottom:-220px;left:50%;transform:translateX(-50%);z-index:1}
 .earth{width:460px;height:460px;border-radius:50%;background:radial-gradient(circle at 32% 30%,#1e5a9a,#0d3060 35%,#071a38 65%,#030d1c);box-shadow:0 0 80px rgba(20,100,220,0.25),0 0 160px rgba(10,60,160,0.1),inset 0 0 80px rgba(0,0,0,0.6);}
@@ -326,6 +483,7 @@ main{flex:1;display:grid;grid-template-columns:1fr 520px;min-height:0}
 .task-card.sel-easy{border-color:var(--cyan);background:rgba(0,212,255,0.07);box-shadow:0 0 18px rgba(0,212,255,0.12)}
 .task-card.sel-medium{border-color:var(--amber);background:rgba(255,184,0,0.07);box-shadow:0 0 18px rgba(255,184,0,0.12)}
 .task-card.sel-hard{border-color:var(--red);background:rgba(255,61,61,0.07);box-shadow:0 0 18px rgba(255,61,61,0.12)}
+.task-card.sel-custom{border-color:var(--purple);background:rgba(168,85,247,0.07);box-shadow:0 0 18px rgba(168,85,247,0.15)}
 .t-icon{font-size:18px;margin-bottom:4px}
 .t-name{font-family:var(--display);font-size:9px;font-weight:700;letter-spacing:2px;margin-bottom:3px}
 .t-desc{font-size:9px;color:var(--muted);line-height:1.5;margin-bottom:5px}
@@ -334,6 +492,7 @@ main{flex:1;display:grid;grid-template-columns:1fr 520px;min-height:0}
 .ttag-c{color:var(--cyan);border-color:rgba(0,212,255,.3);background:rgba(0,212,255,.07)}
 .ttag-a{color:var(--amber);border-color:rgba(255,184,0,.3);background:rgba(255,184,0,.07)}
 .ttag-r{color:var(--red);border-color:rgba(255,61,61,.3);background:rgba(255,61,61,.07)}
+.ttag-p{color:var(--purple);border-color:rgba(168,85,247,.3);background:rgba(168,85,247,.07)}
 .stat-strip{display:none;gap:10px;position:relative;z-index:4;padding:8px 14px;background:rgba(0,0,0,0.35);border:1px solid var(--border);border-radius:4px;width:100%;max-width:580px;}
 .stat-item{flex:1;text-align:center}
 .stat-lbl{font-size:7px;color:var(--muted);letter-spacing:1.5px;text-transform:uppercase;margin-bottom:2px}
@@ -349,6 +508,74 @@ main{flex:1;display:grid;grid-template-columns:1fr 520px;min-height:0}
 .launch-btn:disabled{opacity:.35;cursor:not-allowed;transform:none}
 .launch-btn.running{border-color:var(--amber);color:var(--amber);background:rgba(255,184,0,.08);animation:bpulse .9s ease-in-out infinite}
 @keyframes bpulse{0%,100%{box-shadow:0 0 16px rgba(255,184,0,.1)}50%{box-shadow:0 0 32px rgba(255,184,0,.35)}}
+
+/* ── Custom scenario panel ── */
+.custom-panel{
+  position:relative;z-index:4;width:100%;max-width:580px;
+  background:rgba(168,85,247,0.04);border:1px solid rgba(168,85,247,0.25);
+  border-radius:6px;overflow:hidden;
+  display:flex;flex-direction:column;
+}
+.custom-header{
+  display:flex;align-items:center;justify-content:space-between;
+  padding:7px 12px;cursor:pointer;
+  background:rgba(168,85,247,0.06);border-bottom:1px solid rgba(168,85,247,0.12);
+  user-select:none;
+}
+.custom-header-lbl{font-family:var(--display);font-size:8px;letter-spacing:2px;color:var(--purple)}
+.custom-chevron{font-size:9px;color:var(--purple);transition:transform .2s}
+.custom-chevron.open{transform:rotate(180deg)}
+.custom-body{display:flex;flex-direction:column;gap:8px;padding:10px 12px;max-height:420px;overflow-y:auto;}
+.custom-body.hidden{display:none!important}
+.custom-section{font-size:7px;color:var(--purple);letter-spacing:2px;text-transform:uppercase;margin-bottom:2px;padding-bottom:3px;border-bottom:1px solid rgba(168,85,247,0.12)}
+/* Sliders */
+.slider-row{display:grid;grid-template-columns:100px 1fr 40px;align-items:center;gap:6px}
+.slider-lbl{font-size:8.5px;color:var(--text)}
+input[type=range]{
+  -webkit-appearance:none;appearance:none;width:100%;height:3px;
+  background:rgba(255,255,255,0.08);border-radius:2px;outline:none;
+}
+input[type=range]::-webkit-slider-thumb{
+  -webkit-appearance:none;width:11px;height:11px;border-radius:50%;
+  background:var(--purple);cursor:pointer;box-shadow:0 0 5px rgba(168,85,247,0.5);
+}
+.slider-val{font-family:var(--display);font-size:8.5px;color:var(--purple);text-align:right}
+/* Toggles */
+.toggle-grid{display:grid;grid-template-columns:1fr 1fr;gap:5px}
+.toggle-row{display:flex;align-items:center;gap:7px;padding:4px 7px;border-radius:3px;background:rgba(255,255,255,0.02);border:1px solid rgba(255,255,255,0.04);cursor:pointer;transition:.15s}
+.toggle-row:hover{background:rgba(168,85,247,0.06);border-color:rgba(168,85,247,0.2)}
+.toggle-row input[type=checkbox]{display:none}
+.tog-box{width:26px;height:13px;border-radius:7px;border:1px solid rgba(168,85,247,0.4);background:rgba(0,0,0,0.3);position:relative;flex-shrink:0;transition:.2s}
+.tog-knob{position:absolute;top:1px;left:1px;width:9px;height:9px;border-radius:50%;background:var(--muted);transition:.2s}
+.toggle-row.on .tog-box{background:rgba(168,85,247,0.3);border-color:var(--purple)}
+.toggle-row.on .tog-knob{left:14px;background:var(--purple);box-shadow:0 0 5px rgba(168,85,247,0.6)}
+.toggle-lbl{font-size:8px;color:var(--text)}
+/* Fault checkboxes */
+.fault-grid{display:grid;grid-template-columns:1fr 1fr;gap:4px}
+.fault-chip{
+  display:flex;align-items:center;gap:5px;padding:3px 7px;
+  border-radius:3px;border:1px solid rgba(255,255,255,0.06);
+  background:rgba(255,255,255,0.02);cursor:pointer;transition:.15s;
+}
+.fault-chip:hover{border-color:rgba(255,61,61,0.3);background:rgba(255,61,61,0.04)}
+.fault-chip.active{border-color:rgba(255,61,61,0.5);background:rgba(255,61,61,0.08)}
+.fault-chip input[type=checkbox]{display:none}
+.fault-dot{width:6px;height:6px;border-radius:50%;background:var(--muted);flex-shrink:0;transition:.2s}
+.fault-chip.active .fault-dot{background:var(--red);box-shadow:0 0 4px rgba(255,61,61,0.6)}
+.fault-name{font-size:7.5px;color:var(--text)}
+/* Base task select */
+.base-row{display:flex;align-items:center;gap:8px}
+.base-lbl{font-size:8px;color:var(--muted);white-space:nowrap}
+.base-select{flex:1;background:rgba(0,0,0,0.3);border:1px solid rgba(168,85,247,0.3);border-radius:2px;color:var(--purple);font-family:var(--mono);font-size:8px;padding:3px 6px;outline:none;}
+.custom-launch{
+  font-family:var(--display);font-size:9px;font-weight:700;letter-spacing:2px;
+  padding:8px 20px;background:rgba(168,85,247,0.12);
+  border:1px solid var(--purple);color:var(--purple);cursor:pointer;
+  border-radius:3px;transition:all .2s;width:100%;
+}
+.custom-launch:hover{background:rgba(168,85,247,0.22);box-shadow:0 0 18px rgba(168,85,247,0.25)}
+.custom-launch:disabled{opacity:.35;cursor:not-allowed}
+
 .right{display:flex;flex-direction:column;min-height:0;background:rgba(2,6,10,0.55);backdrop-filter:blur(14px)}
 .score-bar{flex-shrink:0;display:grid;grid-template-columns:1fr 1fr 1fr 1fr;border-bottom:1px solid var(--border);}
 .score-cell{padding:10px 12px;text-align:center;border-right:1px solid var(--border)}
@@ -408,7 +635,7 @@ svg.rchart{width:100%;height:52px;display:block}
 <header>
   <div class="logo-block">
     <div class="live-dot"></div>
-    <div><div class="logo-text">ORBITAL ANOMALY</div><div class="logo-sub">MISSION CONTROL · OPENENV v2.2</div></div>
+    <div><div class="logo-text">ORBITAL ANOMALY</div><div class="logo-sub">A SPACECRAFT MISSION CONTROL ENVIRONMENT</div></div>
   </div>
   <div class="header-center" id="header-center" style="display:none">
     <div class="hstat"><div class="hstat-lbl">TASK</div><div class="hstat-val" id="hc-task">—</div></div>
@@ -453,6 +680,8 @@ svg.rchart{width:100%;height:52px;display:block}
     <div class="subsys-bar-item"><div class="subsys-lbl">Comms</div><div class="subsys-track"><div class="subsys-fill" id="sb-comms" style="width:0%;background:var(--cyan)"></div></div></div>
     <div class="subsys-bar-item"><div class="subsys-lbl">ADCS</div><div class="subsys-track"><div class="subsys-fill" id="sb-adcs" style="width:0%;background:var(--cyan)"></div></div></div>
   </div>
+
+  <!-- Predefined task cards (unchanged) -->
   <div class="task-grid">
     <div class="task-card sel-easy" id="tc-easy" onclick="selectTask('easy')">
       <div class="t-icon">🟢</div><div class="t-name">EASY</div>
@@ -469,9 +698,122 @@ svg.rchart{width:100%;height:52px;display:block}
       <div class="t-desc">Cascade Failure<br>Eclipse · 7 faults</div>
       <div class="t-tags"><span class="ttag ttag-r">SOC 22%</span><span class="ttag ttag-r">ECLIPSE</span><span class="ttag ttag-r">7 FAULTS</span></div>
     </div>
+    <div class="task-card" id="tc-custom" onclick="selectTask('custom')">
+      <div class="t-icon">⚗️</div><div class="t-name">CUSTOM</div>
+      <div class="t-desc">Your scenario<br>Any conditions</div>
+      <div class="t-tags"><span class="ttag ttag-p">SLIDERS</span><span class="ttag ttag-p">FAULTS</span><span class="ttag ttag-p">TOGGLES</span></div>
+    </div>
   </div>
+
+  <!-- Custom scenario panel (hidden until custom tab selected) -->
+  <div class="custom-panel" id="custom-panel" style="display:none">
+    <div class="custom-header" onclick="toggleCustomBody()">
+      <span class="custom-header-lbl">⚗️ SCENARIO BUILDER</span>
+      <span class="custom-chevron open" id="custom-chev">▼</span>
+    </div>
+    <div class="custom-body" id="custom-body">
+
+      <!-- Base task -->
+      <div>
+        <div class="custom-section">Base Template</div>
+        <div class="base-row">
+          <span class="base-lbl">Start from:</span>
+          <select class="base-select" id="cs-base">
+            <option value="easy">Easy (SOC 38%, sunlit)</option>
+            <option value="medium">Medium (thermal crisis)</option>
+            <option value="hard">Hard (eclipse, 7 faults)</option>
+          </select>
+        </div>
+      </div>
+
+      <!-- Tier 1: Sliders -->
+      <div>
+        <div class="custom-section">Tier 1 — Telemetry</div>
+        <div class="slider-row">
+          <span class="slider-lbl">Battery SOC</span>
+          <input type="range" id="sl-bat" min="0" max="100" value="38" oninput="sv('sv-bat',this.value+'%')">
+          <span class="slider-val" id="sv-bat">38%</span>
+        </div>
+        <div class="slider-row">
+          <span class="slider-lbl">Payload Temp</span>
+          <input type="range" id="sl-temp" min="-20" max="110" value="40" oninput="sv('sv-temp',this.value+'°C')">
+          <span class="slider-val" id="sv-temp">40°C</span>
+        </div>
+        <div class="slider-row">
+          <span class="slider-lbl">Comms Signal</span>
+          <input type="range" id="sl-comms" min="0" max="100" value="70" oninput="sv('sv-comms',this.value+'%')">
+          <span class="slider-val" id="sv-comms">70%</span>
+        </div>
+        <div class="slider-row">
+          <span class="slider-lbl">Solar Efficiency</span>
+          <input type="range" id="sl-sol" min="0" max="100" value="65" oninput="sv('sv-sol',this.value+'%')">
+          <span class="slider-val" id="sv-sol">65%</span>
+        </div>
+        <div class="slider-row">
+          <span class="slider-lbl">Attitude Error</span>
+          <input type="range" id="sl-att" min="0" max="90" value="30" oninput="sv('sv-att',this.value+'°')">
+          <span class="slider-val" id="sv-att">30°</span>
+        </div>
+        <div class="slider-row">
+          <span class="slider-lbl">Wheel Saturation</span>
+          <input type="range" id="sl-wheel" min="0" max="100" value="25" oninput="sv('sv-wheel',this.value+'%')">
+          <span class="slider-val" id="sv-wheel">25%</span>
+        </div>
+        <div class="slider-row">
+          <span class="slider-lbl">Radiator Eff.</span>
+          <input type="range" id="sl-rad" min="0" max="100" value="80" oninput="sv('sv-rad',this.value+'%')">
+          <span class="slider-val" id="sv-rad">80%</span>
+        </div>
+      </div>
+
+      <!-- Tier 2: Toggles -->
+      <div>
+        <div class="custom-section">Tier 2 — Orbital Context</div>
+        <div class="toggle-grid">
+          <div class="toggle-row" id="tog-eclipse" onclick="togRow('tog-eclipse')">
+            <div class="tog-box"><div class="tog-knob"></div></div>
+            <span class="toggle-lbl">🌑 Eclipse</span>
+          </div>
+          <div class="toggle-row on" id="tog-gs" onclick="togRow('tog-gs')">
+            <div class="tog-box"><div class="tog-knob"></div></div>
+            <span class="toggle-lbl">📡 GS Visible</span>
+          </div>
+          <div class="toggle-row" id="tog-obs" onclick="togRow('tog-obs')">
+            <div class="tog-box"><div class="tog-knob"></div></div>
+            <span class="toggle-lbl">🔭 Obs. Window</span>
+          </div>
+          <div class="toggle-row" id="tog-rad" onclick="togRow('tog-rad')">
+            <div class="tog-box"><div class="tog-knob"></div></div>
+            <span class="toggle-lbl">☢️ Radiation Zone</span>
+          </div>
+          <div class="toggle-row on" id="tog-pay" onclick="togRow('tog-pay')">
+            <div class="tog-box"><div class="tog-knob"></div></div>
+            <span class="toggle-lbl">📦 Payload ON</span>
+          </div>
+          <div class="toggle-row" id="tog-safe" onclick="togRow('tog-safe')">
+            <div class="tog-box"><div class="tog-knob"></div></div>
+            <span class="toggle-lbl">🛡️ Safe Mode</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Tier 3: Fault injection -->
+      <div>
+        <div class="custom-section">Tier 3 — Fault Injection</div>
+        <div class="fault-grid" id="fault-grid">
+          <!-- generated by JS -->
+        </div>
+      </div>
+
+    </div>
+    <div style="padding:8px 12px;border-top:1px solid rgba(168,85,247,0.15);background:rgba(0,0,0,0.2);flex-shrink:0">
+      <button class="custom-launch" id="custom-launch-btn" onclick="launchCustom()">⚗️ RUN CUSTOM SCENARIO</button>
+    </div>
+  </div>
+
   <button class="launch-btn" id="launch-btn" onclick="launchMission()">▶ LAUNCH MISSION</button>
 </div>
+
 <div class="right">
   <div class="score-bar">
     <div class="score-cell"><div class="sc-lbl">AVG REWARD</div><div class="sc-val" id="sc-avg">—</div></div>
@@ -521,7 +863,9 @@ svg.rchart{width:100%;height:52px;display:block}
 </div>
 </main>
 </div>
+
 <script>
+// ── Stars ──────────────────────────────────────────────────────────────────────
 (function(){
   const c=document.getElementById('stars');
   for(let i=0;i<130;i++){
@@ -532,27 +876,104 @@ svg.rchart{width:100%;height:52px;display:block}
     c.appendChild(s);
   }
 })();
-let selTask='easy',running=false;
+
+// ── Fault chip builder ────────────────────────────────────────────────────────
+const ALL_FAULTS=[
+  'mppt_stuck','panel_deployment_jam','bus_short_transient','battery_aging',
+  'reaction_wheel_saturation','gyro_drift','star_tracker_dropout',
+  'radiator_valve_stuck','heat_pipe_failure','heater_relay_latch',
+  'transponder_overheating','amplifier_degradation','antenna_gimbal_stall'
+];
+(function(){
+  const grid=document.getElementById('fault-grid');
+  ALL_FAULTS.forEach(f=>{
+    const chip=document.createElement('div');
+    chip.className='fault-chip';chip.id='fc-'+f;
+    chip.onclick=()=>{chip.classList.toggle('active');const dot=chip.querySelector('.fault-dot');dot.style.background=chip.classList.contains('active')?'var(--red)':'var(--muted)';};
+    chip.innerHTML=`<div class="fault-dot"></div><span class="fault-name">${f.replace(/_/g,' ')}</span>`;
+    grid.appendChild(chip);
+  });
+})();
+
+// ── Toggle helper ─────────────────────────────────────────────────────────────
+function togRow(id){
+  const el=document.getElementById(id);
+  el.classList.toggle('on');
+}
+function togVal(id){return document.getElementById(id).classList.contains('on')}
+
+// ── Custom panel collapse ─────────────────────────────────────────────────────
+function toggleCustomBody(){
+  const b=document.getElementById('custom-body');
+  const ch=document.getElementById('custom-chev');
+  const isOpen=!b.classList.contains('hidden');
+  if(isOpen){b.classList.add('hidden');ch.classList.remove('open');}
+  else{b.classList.remove('hidden');ch.classList.add('open');}
+}
+
+// ── Slider display value ──────────────────────────────────────────────────────
+function sv(id,val){document.getElementById(id).textContent=val}
+
+// ── Core state ────────────────────────────────────────────────────────────────
+let selTask='easy', running=false;
 const rewards=[];
 const ICONS={rotate_to_sun:'☀️',disable_payload:'📦',reboot_comms:'📡',enter_safe_mode:'🛡️',switch_power_bus:'🔋',noop:'⏸️'};
 const SPEC_COLORS={EPS_Specialist:'rgba(0,212,255,.25)',Thermal_Specialist:'rgba(168,85,247,.25)',Comms_Specialist:'rgba(0,255,136,.2)'};
 const SPEC_BORDER={EPS_Specialist:'rgba(0,212,255,.5)',Thermal_Specialist:'rgba(168,85,247,.5)',Comms_Specialist:'rgba(0,255,136,.4)'};
+
 function rColor(r){return r>=.7?'var(--green)':r>=.5?'var(--cyan)':r>=.35?'var(--amber)':'var(--red)'}
 function rClass(r){return r>=.7?'lv-high':r>=.5?'lv-mid':r>=.35?'lv-low':'lv-crit'}
 function fColor(p){return p>.7?'var(--red)':p>.4?'var(--amber)':'var(--cyan)'}
 function statusColor(st){const s=(st||'').toLowerCase();return s==='critical'?'var(--red)':s==='warning'?'var(--amber)':'var(--green)'}
+
 function selectTask(task){
   selTask=task;
-  ['easy','medium','hard'].forEach(t=>{document.getElementById('tc-'+t).className='task-card'+(t===task?' sel-'+t:'');});
+  ['easy','medium','hard','custom'].forEach(t=>{
+    const el=document.getElementById('tc-'+t);
+    if(el) el.className='task-card'+(t===task?' sel-'+t:'');
+  });
   const glow=document.getElementById('sat-glow'),orbit=document.getElementById('sat-orbit');
   const sig=document.getElementById('sig-ring'),wl=document.getElementById('wing-l'),wr=document.getElementById('wing-r');
   const sub=document.getElementById('scene-sub');
+  const cp=document.getElementById('custom-panel');
+  const lb=document.getElementById('launch-btn');
   glow.className='sat-glow';orbit.className='sat-orbit';
   wl.classList.remove('mis');wr.classList.remove('mis');sig.style.display='';
+  cp.style.display='none'; lb.style.display='';
   if(task==='hard'){glow.classList.add('crit');orbit.classList.add('fast');wl.classList.add('mis');wr.classList.add('mis');sig.style.display='none';sub.textContent='ECLIPSE · 7 FAULTS · SOC 22% · GS BLACKOUT · RADIATION ZONE';}
   else if(task==='medium'){glow.classList.add('warn');sub.textContent='THERMAL CRISIS · 2 FAULTS · PAYLOAD TEMP 68°C · SCIENCE WINDOW ACTIVE';}
-  else{sub.textContent='EPS CRISIS · 1 FAULT (MPPT STUCK) · SOC 38% · SUNLIT';}
+  else if(task==='custom'){
+    glow.classList.add('warn');orbit.className='sat-orbit';
+    sub.textContent='CUSTOM SCENARIO · SET ANY CONDITIONS BELOW · AGENT RESPONDS';
+    cp.style.display='block'; lb.style.display='none';
+  } else {
+    sub.textContent='EPS CRISIS · 1 FAULT (MPPT STUCK) · SOC 38% · SUNLIT';
+  }
 }
+
+// ── Collect custom state from panel ──────────────────────────────────────────
+function collectCustomState(){
+  const faults=ALL_FAULTS.filter(f=>document.getElementById('fc-'+f)?.classList.contains('active'));
+  return {
+    base_task: document.getElementById('cs-base').value,
+    battery_soc:          parseFloat(document.getElementById('sl-bat').value),
+    payload_temp:         parseFloat(document.getElementById('sl-temp').value),
+    comms_signal:         parseFloat(document.getElementById('sl-comms').value)/100,
+    solar_efficiency:     parseFloat(document.getElementById('sl-sol').value)/100,
+    attitude_error_deg:   parseFloat(document.getElementById('sl-att').value),
+    wheel_saturation_level: parseFloat(document.getElementById('sl-wheel').value)/100,
+    radiator_efficiency:  parseFloat(document.getElementById('sl-rad').value)/100,
+    eclipse:              togVal('tog-eclipse'),
+    ground_station_visible: togVal('tog-gs'),
+    observation_window_active: togVal('tog-obs'),
+    radiation_zone:       togVal('tog-rad'),
+    payload_on:           togVal('tog-pay'),
+    safe_mode:            togVal('tog-safe'),
+    faults:               faults,
+  };
+}
+
+// ── Chart ─────────────────────────────────────────────────────────────────────
 function updateChart(){
   if(!rewards.length)return;
   const W=460,H=52,pad=4,n=rewards.length;
@@ -564,6 +985,7 @@ function updateChart(){
     const col=diff>0.03?'var(--green)':diff<-0.03?'var(--red)':'var(--amber)';
     document.getElementById('chart-trend').style.color=col;document.getElementById('chart-trend').textContent=trend;}
 }
+
 function updateSubsysBars(t){
   if(!t)return;
   document.getElementById('subsys-bars').style.display='flex';
@@ -576,11 +998,13 @@ function updateSubsysBars(t){
   const adcs=Math.max(0,Math.min(100,100-(t.wheel_sat||0)));
   const adcsEl=document.getElementById('sb-adcs');adcsEl.style.width=adcs+'%';adcsEl.style.background=adcs<30?'var(--red)':adcs<60?'var(--amber)':'var(--purple)';
 }
+
 function buildFaultBars(beliefs){
   if(!beliefs)return'';
   return`<div class="fbars">`+Object.entries(beliefs).sort((a,b)=>b[1]-a[1]).slice(0,5).map(([n,p])=>
     `<div class="fbar-row"><span class="fn">${n.replace(/_/g,' ')}</span><div class="fb"><div class="ff" style="width:${(p*100).toFixed(0)}%;background:${fColor(p)}"></div></div><span class="fp" style="color:${fColor(p)}">${Math.round(p*100)}%</span></div>`).join('')+`</div>`;
 }
+
 function buildSpecs(specs){
   if(!specs)return'';
   return`<div class="specs">`+Object.entries(specs).map(([name,s])=>{
@@ -588,10 +1012,11 @@ function buildSpecs(specs){
     return`<span class="spec-pill" style="background:${bg};border-color:${bc};color:var(--text)">${short}: ${s.action.replace(/_/g,' ')} <span style="opacity:.6">${Math.round(s.confidence*100)}%</span></span>`;
   }).join('')+`</div>`;
 }
-async function launchMission(){
-  if(running)return;running=true;rewards.length=0;
-  const btn=document.getElementById('launch-btn'),feed=document.getElementById('feed-wrap');
-  btn.textContent='⟳ EXECUTING...';btn.className='launch-btn running';btn.disabled=true;
+
+// ── Shared UI reset / render ──────────────────────────────────────────────────
+function resetUI(taskLabel){
+  rewards.length=0;
+  const feed=document.getElementById('feed-wrap');
   feed.innerHTML='';
   const idleEl=document.getElementById('idle-el');if(idleEl)idleEl.style.display='none';
   document.getElementById('verdict').classList.remove('show');
@@ -601,74 +1026,118 @@ async function launchMission(){
   document.getElementById('wm-ticker').innerHTML='WORLD MODEL — <span style="color:var(--amber)">MISSION IN PROGRESS...</span>';
   document.getElementById('stat-strip').style.display='flex';
   document.getElementById('header-center').style.display='flex';
-  document.getElementById('hc-task').textContent=selTask.toUpperCase();
+  document.getElementById('hc-task').textContent=taskLabel.toUpperCase();
   document.getElementById('hc-step').textContent='0/12';document.getElementById('hc-phase').textContent='1/3';document.getElementById('hc-avg').textContent='—';
+}
+
+async function renderSteps(data){
+  let peakReward=0;
+  for(let i=0;i<data.steps.length;i++){
+    await new Promise(r=>setTimeout(r,120));
+    const s=data.steps[i],t=s.telemetry||{},wm=s.world_model||{};
+    const icon=ICONS[s.action]||'⚡',cls=rClass(s.reward),col=rColor(s.reward);
+    if(s.reward>peakReward)peakReward=s.reward;
+    document.getElementById('hc-step').textContent=`${i+1}/${data.steps.length}`;
+    document.getElementById('hc-phase').textContent=`${(wm.phase||0)+1}/3`;
+    document.getElementById('ls-bat').textContent=t.battery_soc+'%';
+    document.getElementById('ls-bat').style.color=t.battery_soc<20?'var(--red)':t.battery_soc<40?'var(--amber)':'var(--cyan)';
+    document.getElementById('ls-temp').textContent=t.thermal_temp+'°C';
+    document.getElementById('ls-temp').style.color=t.thermal_temp>85?'var(--red)':t.thermal_temp>70?'var(--amber)':'var(--cyan)';
+    document.getElementById('ls-comms').textContent=t.comms_signal+'%';
+    document.getElementById('ls-comms').style.color=t.comms_signal<30?'var(--red)':t.comms_signal<60?'var(--amber)':'var(--cyan)';
+    document.getElementById('ls-phase').textContent='P'+((wm.phase||0)+1)+'/3';
+    document.getElementById('ls-dom').textContent=(wm.dominant_subsystem||'—').toUpperCase();
+    updateSubsysBars(t);
+    const glow=document.getElementById('sat-glow');
+    if(t.mission_status==='critical'){glow.className='sat-glow crit'}else if(t.mission_status==='warning'){glow.className='sat-glow warn'}else{glow.className='sat-glow'}
+    document.getElementById('wm-ticker').innerHTML=
+      `WORLD MODEL — Dom: <span>${(wm.dominant_subsystem||'?').toUpperCase()}</span> &nbsp;·&nbsp; ${wm.top_faults||'—'} &nbsp;·&nbsp; Phase <span>${(wm.phase||0)+1}/3</span>`+
+      (!t.sunlit?' &nbsp;·&nbsp; <span style="color:var(--amber)">🌑 ECLIPSE</span>':'')+
+      (!t.gs_visible?' &nbsp;·&nbsp; <span style="color:var(--red)">GS BLACKOUT</span>':'')+
+      (t.safe_mode?' &nbsp;·&nbsp; <span style="color:var(--red)">SAFE MODE</span>':'');
+    const el=document.createElement('div');el.className=`step-card ${cls}`;
+    const feed=document.getElementById('feed-wrap');
+    el.innerHTML=`<div class="sn">${String(s.step).padStart(2,'0')}</div>`+
+      `<div class="sb"><div class="sa">${icon} ${s.action.replace(/_/g,' ').toUpperCase()}</div>`+
+      `<div class="sr-text">${s.rationale}</div>`+
+      `<div class="st">BAT ${t.battery_soc}% · TEMP ${t.thermal_temp}°C · COMMS ${t.comms_signal}%`+
+      `${!t.sunlit?' · <span style="color:var(--amber)">ECLIPSE</span>':''}${t.safe_mode?' · <span style="color:var(--red)">SAFE MODE</span>':''}`+
+      ` · <span style="color:${statusColor(t.mission_status)}">${(t.mission_status||'stable').toUpperCase()}</span></div>`+
+      buildFaultBars(wm.fault_beliefs)+buildSpecs(s.specialists)+`</div>`+
+      `<div class="srw" style="color:${col}">${s.reward.toFixed(3)}</div>`;
+    feed.appendChild(el);feed.scrollTop=feed.scrollHeight;
+    rewards.push(s.reward);
+    const avg=rewards.reduce((a,b)=>a+b,0)/rewards.length;
+    document.getElementById('sc-avg').textContent=avg.toFixed(3);document.getElementById('sc-avg').className='sc-val '+(avg>=.7?'green':avg>=.5?'':'amber');
+    document.getElementById('sc-peak').textContent=peakReward.toFixed(3);document.getElementById('sc-peak').className='sc-val '+(peakReward>=.7?'green':'');
+    document.getElementById('sc-steps').textContent=`${i+1} / ${data.steps.length}`;
+    document.getElementById('sc-status').textContent=(t.mission_status||'stable').toUpperCase();
+    document.getElementById('sc-status').className='sc-val '+(t.mission_status==='critical'?'red':t.mission_status==='warning'?'amber':'green');
+    document.getElementById('hc-avg').textContent=avg.toFixed(3);
+    updateChart();
+  }
+  return peakReward;
+}
+
+function renderVerdict(data, peakReward, taskLabel){
+  const finalAvg=rewards.reduce((a,b)=>a+b,0)/rewards.length,success=finalAvg>=0.45;
+  document.getElementById('vd-task').textContent=taskLabel.toUpperCase();
+  document.getElementById('vd-avg').textContent=finalAvg.toFixed(4);document.getElementById('vd-avg').style.color=rColor(finalAvg);
+  document.getElementById('vd-peak').textContent=peakReward.toFixed(4);
+  document.getElementById('vd-steps').textContent=data.total_steps;
+  document.getElementById('vd-fin').textContent=(data.final_status||'stable').toUpperCase();document.getElementById('vd-fin').style.color=statusColor(data.final_status);
+  const badge=document.getElementById('vd-badge');
+  if(success){badge.textContent='MISSION SUCCESS ✓';badge.style.cssText='background:rgba(0,255,136,.1);color:var(--green);border:1px solid rgba(0,255,136,.3);padding:2px 8px;border-radius:2px;font-size:8px';}
+  else{badge.textContent='MISSION CRITICAL ✗';badge.style.cssText='background:rgba(255,61,61,.1);color:var(--red);border:1px solid rgba(255,61,61,.3);padding:2px 8px;border-radius:2px;font-size:8px';}
+  document.getElementById('verdict').classList.add('show');
+  document.getElementById('wm-ticker').innerHTML='WORLD MODEL — <span style="color:'+(success?'var(--green)':'var(--amber)')+'">MISSION '+(success?'COMPLETE ✓':'ENDED')+' · AVG REWARD: '+finalAvg.toFixed(4)+'</span>';
+}
+
+function renderError(msg){
+  const feed=document.getElementById('feed-wrap');
+  const el=document.createElement('div');
+  el.style.cssText='color:var(--red);padding:14px;font-size:10px;background:rgba(255,61,61,.08);border:1px solid rgba(255,61,61,.2);border-radius:3px;margin:8px;line-height:1.7;font-family:monospace';
+  el.textContent='Error: '+msg;feed.appendChild(el);
+}
+
+// ── Launch predefined mission (unchanged logic) ───────────────────────────────
+async function launchMission(){
+  if(running)return;running=true;
+  const btn=document.getElementById('launch-btn');
+  btn.textContent='⟳ EXECUTING...';btn.className='launch-btn running';btn.disabled=true;
+  resetUI(selTask);
   try{
     const res=await fetch('/run_episode',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({task_id:selTask})});
     if(!res.ok){const txt=await res.text();throw new Error(`Server error ${res.status}: ${txt.slice(0,300)}`);}
     const data=await res.json();
     if(data.error){throw new Error(data.error+': '+(data.detail||'').slice(0,300))}
-    let peakReward=0;
-    for(let i=0;i<data.steps.length;i++){
-      await new Promise(r=>setTimeout(r,120));
-      const s=data.steps[i],t=s.telemetry||{},wm=s.world_model||{};
-      const icon=ICONS[s.action]||'⚡',cls=rClass(s.reward),col=rColor(s.reward);
-      if(s.reward>peakReward)peakReward=s.reward;
-      document.getElementById('hc-step').textContent=`${i+1}/${data.steps.length}`;
-      document.getElementById('hc-phase').textContent=`${(wm.phase||0)+1}/3`;
-      document.getElementById('ls-bat').textContent=t.battery_soc+'%';
-      document.getElementById('ls-bat').style.color=t.battery_soc<20?'var(--red)':t.battery_soc<40?'var(--amber)':'var(--cyan)';
-      document.getElementById('ls-temp').textContent=t.thermal_temp+'°C';
-      document.getElementById('ls-temp').style.color=t.thermal_temp>85?'var(--red)':t.thermal_temp>70?'var(--amber)':'var(--cyan)';
-      document.getElementById('ls-comms').textContent=t.comms_signal+'%';
-      document.getElementById('ls-comms').style.color=t.comms_signal<30?'var(--red)':t.comms_signal<60?'var(--amber)':'var(--cyan)';
-      document.getElementById('ls-phase').textContent='P'+((wm.phase||0)+1)+'/3';
-      document.getElementById('ls-dom').textContent=(wm.dominant_subsystem||'—').toUpperCase();
-      updateSubsysBars(t);
-      const glow=document.getElementById('sat-glow');
-      if(t.mission_status==='critical'){glow.className='sat-glow crit'}else if(t.mission_status==='warning'){glow.className='sat-glow warn'}else{glow.className='sat-glow'}
-      document.getElementById('wm-ticker').innerHTML=
-        `WORLD MODEL — Dom: <span>${(wm.dominant_subsystem||'?').toUpperCase()}</span> &nbsp;·&nbsp; ${wm.top_faults||'—'} &nbsp;·&nbsp; Phase <span>${(wm.phase||0)+1}/3</span>`+
-        (!t.sunlit?' &nbsp;·&nbsp; <span style="color:var(--amber)">🌑 ECLIPSE</span>':'')+
-        (!t.gs_visible?' &nbsp;·&nbsp; <span style="color:var(--red)">GS BLACKOUT</span>':'')+
-        (t.safe_mode?' &nbsp;·&nbsp; <span style="color:var(--red)">SAFE MODE</span>':'');
-      const el=document.createElement('div');el.className=`step-card ${cls}`;
-      el.innerHTML=`<div class="sn">${String(s.step).padStart(2,'0')}</div>`+
-        `<div class="sb"><div class="sa">${icon} ${s.action.replace(/_/g,' ').toUpperCase()}</div>`+
-        `<div class="sr-text">${s.rationale}</div>`+
-        `<div class="st">BAT ${t.battery_soc}% · TEMP ${t.thermal_temp}°C · COMMS ${t.comms_signal}%`+
-        `${!t.sunlit?' · <span style="color:var(--amber)">ECLIPSE</span>':''}${t.safe_mode?' · <span style="color:var(--red)">SAFE MODE</span>':''}`+
-        ` · <span style="color:${statusColor(t.mission_status)}">${(t.mission_status||'stable').toUpperCase()}</span></div>`+
-        buildFaultBars(wm.fault_beliefs)+buildSpecs(s.specialists)+`</div>`+
-        `<div class="srw" style="color:${col}">${s.reward.toFixed(3)}</div>`;
-      feed.appendChild(el);feed.scrollTop=feed.scrollHeight;
-      rewards.push(s.reward);
-      const avg=rewards.reduce((a,b)=>a+b,0)/rewards.length;
-      document.getElementById('sc-avg').textContent=avg.toFixed(3);document.getElementById('sc-avg').className='sc-val '+(avg>=.7?'green':avg>=.5?'':'amber');
-      document.getElementById('sc-peak').textContent=peakReward.toFixed(3);document.getElementById('sc-peak').className='sc-val '+(peakReward>=.7?'green':'');
-      document.getElementById('sc-steps').textContent=`${i+1} / ${data.steps.length}`;
-      document.getElementById('sc-status').textContent=(t.mission_status||'stable').toUpperCase();
-      document.getElementById('sc-status').className='sc-val '+(t.mission_status==='critical'?'red':t.mission_status==='warning'?'amber':'green');
-      document.getElementById('hc-avg').textContent=avg.toFixed(3);
-      updateChart();
-    }
-    const finalAvg=rewards.reduce((a,b)=>a+b,0)/rewards.length,success=finalAvg>=0.45;
-    document.getElementById('vd-task').textContent=data.task_id.toUpperCase();
-    document.getElementById('vd-avg').textContent=finalAvg.toFixed(4);document.getElementById('vd-avg').style.color=rColor(finalAvg);
-    document.getElementById('vd-peak').textContent=peakReward.toFixed(4);
-    document.getElementById('vd-steps').textContent=data.total_steps;
-    document.getElementById('vd-fin').textContent=(data.final_status||'stable').toUpperCase();document.getElementById('vd-fin').style.color=statusColor(data.final_status);
-    const badge=document.getElementById('vd-badge');
-    if(success){badge.textContent='MISSION SUCCESS ✓';badge.style.cssText='background:rgba(0,255,136,.1);color:var(--green);border:1px solid rgba(0,255,136,.3);padding:2px 8px;border-radius:2px;font-size:8px';}
-    else{badge.textContent='MISSION CRITICAL ✗';badge.style.cssText='background:rgba(255,61,61,.1);color:var(--red);border:1px solid rgba(255,61,61,.3);padding:2px 8px;border-radius:2px;font-size:8px';}
-    document.getElementById('verdict').classList.add('show');
-    document.getElementById('wm-ticker').innerHTML='WORLD MODEL — <span style="color:'+(success?'var(--green)':'var(--amber)')+'">MISSION '+(success?'COMPLETE ✓':'ENDED')+' · AVG REWARD: '+finalAvg.toFixed(4)+'</span>';
-  }catch(e){
-    const el=document.createElement('div');
-    el.style.cssText='color:var(--red);padding:14px;font-size:10px;background:rgba(255,61,61,.08);border:1px solid rgba(255,61,61,.2);border-radius:3px;margin:8px;line-height:1.7;font-family:monospace';
-    el.textContent='Error: '+e.message;feed.appendChild(el);
-  }
+    const peak=await renderSteps(data);
+    renderVerdict(data,peak,selTask);
+  }catch(e){renderError(e.message);}
   running=false;btn.textContent='▶ RUN AGAIN';btn.className='launch-btn';btn.disabled=false;
+}
+
+// ── Launch custom scenario ────────────────────────────────────────────────────
+async function launchCustom(){
+  if(running)return;running=true;
+  const btn=document.getElementById('custom-launch-btn');
+  btn.textContent='⟳ EXECUTING...';btn.disabled=true;
+  resetUI('CUSTOM');
+  try{
+    const payload=collectCustomState();
+    const faultCount=payload.faults.length;
+    const inEclipse=payload.eclipse;
+    document.getElementById('hc-task').textContent=
+      `CUSTOM${faultCount>0?' · '+faultCount+'F':''}${inEclipse?' · 🌑':''}`;
+
+    const res=await fetch('/run_custom',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+    if(!res.ok){const txt=await res.text();throw new Error(`Server error ${res.status}: ${txt.slice(0,300)}`);}
+    const data=await res.json();
+    if(data.error){throw new Error(data.error+': '+(data.detail||'').slice(0,300))}
+    const peak=await renderSteps(data);
+    renderVerdict(data,peak,'CUSTOM');
+  }catch(e){renderError(e.message);}
+  running=false;btn.textContent='⚗️ RUN CUSTOM SCENARIO';btn.disabled=false;
 }
 </script>
 </body>
