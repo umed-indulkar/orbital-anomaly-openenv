@@ -6,7 +6,7 @@
 
 Okay, let me just show you something cool first.
 
-Imagine you're working at a space agency. It's 3am. Your phone rings. A satellite worth €500 million is 400 kilometres above Earth, and something has gone wrong. The battery is draining. The solar panels aren't charging it properly. The thermal system is overheating. The comms link is going fuzzy. And you have **20 decision windows**, 12 chances to send the right command, before it becomes unrecoverable.
+Imagine you're working at a space agency. It's 3am. Your phone rings. A satellite worth ₹ 5000 crore is 400 kilometres above Earth, and something has gone wrong. The battery is draining. The solar panels aren't charging it properly. The thermal system is overheating. The comms link is going fuzzy. And you have **20 decision windows**, 12 chances to send the right command, before it becomes unrecoverable.
 
 Ground station is out of view. You can't call anyone. You're on your own.
 
