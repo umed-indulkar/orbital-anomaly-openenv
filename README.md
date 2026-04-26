@@ -8,7 +8,7 @@ app_port: 8000
 pinned: false
 ---
 
-# 🛰️ Orbital Anomaly OpenEnv v2.2
+# 🛰️ Orbital Anomaly OpenEnv v3
 
 > **You are the last line of defense for a €500M spacecraft.**  
 > 400km above Earth. 36 decision windows before the batteries die.  
@@ -69,7 +69,7 @@ Every fault mode, thermal cascade, and orbital constraint in this environment is
 └──────────────────────────────┬───────────────────────────────────────┘
                                │
 ┌──────────────────────────────▼───────────────────────────────────────┐
-│              SPACECRAFT SIMULATOR v2.2                               │
+│              SPACECRAFT SIMULATOR v3                               │
 │  EPS:     power-balance physics (solar input, bus drain, SOC)       │
 │  ADCS:    cosine solar alignment, reaction wheel saturation         │
 │  Thermal: 3-zone propagation (payload / avionics / battery)         │
@@ -116,7 +116,7 @@ Every fault mode, thermal cascade, and orbital constraint in this environment is
 | Comms | `antenna_pointing_error`, `transmitter_power`, `bit_error_rate`, `uplink_margin*`, `packet_loss_ratio`, `command_latency_ms*` |
 | Orbital | `sunlit`, `eclipse_timer`, `ground_station_visible`, `radiation_zone`, `observation_window_active` |
 
-**V2.2 metadata** (in every observation):
+**v3 metadata** (in every observation):
 
 | Key | Description |
 |-----|-------------|
@@ -344,7 +344,7 @@ HF_TOKEN=hf_... python inference.py         # LLM via HF inference API
 git clone https://github.com/umed-indulkar/orbital-anomaly-openenv.git
 cd orbital-anomaly-openenv
 uv sync
-openenv validate       # must pass before any submission
+openenv validate       
 uv run server          # → http://localhost:8000
 ```
 
@@ -383,12 +383,12 @@ All 8 tests must pass:
 orbital-anomaly-openenv/
 ├── server/
 │   ├── app.py                                       # FastAPI + OpenEnv server
-│   └── orbital_anomaly_openenv_environment.py       # V2.2 spacecraft simulator
-├── models.py                                        # Pydantic typed models (V1 + V2)
+│   └── orbital_anomaly_openenv_environment.py       # v3 spacecraft simulator
+├── models.py                                        # Pydantic typed models 
 ├── client.py                                        # Typed Python client
 ├── inference.py                                     # Multi-agent baseline + LLM policy
 ├── test_reward.py                                   # Complete V2 test suite
-├── Orbital_Anomaly_openenv.ipynb                 # GRPO training notebook (v4.1)
+├── Orbital_Anomaly_openenv.ipynb                 # GRPO training notebook 
 ├── blog.md                                          # Plain-English explainer + images
 ├── images/                                          # All blog/training visualizations
 │   ├── task_snapshot.png

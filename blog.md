@@ -6,7 +6,7 @@
 
 Okay, let me just show you something cool first.
 
-Imagine you're working at a space agency. It's 3am. Your phone rings. A satellite worth €500 million is 400 kilometres above Earth, and something has gone wrong. The battery is draining. The solar panels aren't charging it properly. The thermal system is overheating. The comms link is going fuzzy. And you have **12 decision windows** — 12 chances to send the right command — before it becomes unrecoverable.
+Imagine you're working at a space agency. It's 3am. Your phone rings. A satellite worth €500 million is 400 kilometres above Earth, and something has gone wrong. The battery is draining. The solar panels aren't charging it properly. The thermal system is overheating. The comms link is going fuzzy. And you have **12 decision windows**, 12 chances to send the right command, before it becomes unrecoverable.
 
 Ground station is out of view. You can't call anyone. You're on your own.
 
@@ -14,11 +14,11 @@ That's the scenario I built for an AI to learn. And then I watched the AI figure
 
 ---
 
-## Wait, what exactly did you build?
+## Wait, what is this exactly?
 
 I built a **simulated spacecraft that breaks in realistic ways**, and then trained an AI agent to fix it.
 
-This is called a **reinforcement learning environment**. Think of it like a video game, except instead of Mario collecting coins, it's an AI learning to manage a dying satellite. Every "move" the AI makes gets a score. Over time, the AI learns which moves lead to better scores, and gets better at the job.
+This is called a **reinforcement learning environment**. Think of it like a spacecraft mission control simulator, it's an AI learning to manage a dying satellite. Every "move" the AI makes gets a score. Over time, the AI learns which moves lead to better scores, and gets better at the job.
 
 The environment is called **Orbital Anomaly OpenEnv**. It's live, it's real, and you can talk to it right now via an API.
 
@@ -28,7 +28,7 @@ The environment is called **Orbital Anomaly OpenEnv**. It's live, it's real, and
 
 Because it's a perfect test for AI decision-making.
 
-Real spacecraft have **cascading failures** — one thing breaks, which causes another thing to break, which causes another. An AI that can handle this kind of situation has learned something genuinely useful: how to reason about causes and consequences, how to plan ahead, and how to make tradeoffs.
+Real spacecraft have **cascading failures** , one thing breaks, which causes another thing to break, which causes another. An AI that can handle this kind of situation has learned something genuinely useful: how to reason about causes and consequences, how to plan ahead, and how to make tradeoffs.
 
 Here's a real example of how satellite failures cascade:
 
@@ -106,11 +106,11 @@ There are 13 possible hidden faults in this environment:
 - `amplifier_degradation` — signal amplifier weakening
 - `antenna_gimbal_stall` — antenna can't track
 
-The AI never sees these directly. It has to *infer* them — like a doctor diagnosing a patient from symptoms, not from a lab report.
+The AI never sees these directly. It has to *infer* them, like a doctor diagnosing a patient from symptoms, not from a lab report.
 
-For example: if the battery is draining faster than expected, but the solar panels look physically healthy, that pattern suggests the solar charge controller (`mppt_stuck`) is broken — not the panels themselves. Different fault, different fix.
+For example: if the battery is draining faster than expected, but the solar panels look physically healthy, that pattern suggests the solar charge controller (`mppt_stuck`) is broken, not the panels themselves. Different fault, different fix.
 
-Every step, the AI maintains a "belief state" — a probability estimate for each of the 13 faults:
+Every step, the AI maintains a "belief state", a probability estimate for each of the 13 faults:
 
 ```
 mppt_stuck              ████████████████░░  78%  ← inferred from low solar output
@@ -141,7 +141,7 @@ The AI has exactly 6 possible actions at each step:
 
 The AI picks one action per step. Twelve steps to save the spacecraft.
 
-One thing the AI *must* learn: **`rotate_to_sun` does absolutely nothing when the spacecraft is in eclipse**. There's no sun. Before training, the AI keeps trying to rotate toward the sun even in the dark — just burning through its decision window doing nothing. After training, it learns to switch to the backup power bus instead.
+One thing the AI *must* learn: **`rotate_to_sun` does absolutely nothing when the spacecraft is in eclipse**. There's no sun. Before training, the AI keeps trying to rotate toward the sun even in the dark, just burning through its decision window doing nothing. After training, it learns to switch to the backup power bus instead.
 
 ---
 
