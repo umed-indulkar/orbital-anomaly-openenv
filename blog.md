@@ -330,7 +330,7 @@ The full training notebook (runs on free Colab) is linked in the README. Open it
 - 🛰️ **Live Space**: https://codequasar-orbital-anomaly-openenv.hf.space
 - 📖 **API Docs**: https://codequasar-orbital-anomaly-openenv.hf.space/docs
 - 💾 **GitHub**: https://github.com/umed-indulkar/orbital-anomaly-openenv
-- 📓 **Training Notebook**: [Orbital_Anomaly_openenv_V2.ipynb](./Orbital_Anomaly_openenv_V2.ipynb)
+- 📓 **Training Notebook**: [Orbital_Anomaly_openenv.ipynb](./Orbital_Anomaly_openenv.ipynb)
 - 📋 **Full Technical README**: [README.md](./README.md)
 
 ---
