@@ -16,7 +16,7 @@ pinned: false
 
 [![OpenEnv](https://img.shields.io/badge/OpenEnv-v0.2.3-blue)](https://github.com/meta-pytorch/OpenEnv)
 [![Space](https://img.shields.io/badge/🤗_Live_Demo-HF_Space-orange)](https://codequasar-orbital-anomaly-openenv.hf.space)
-[![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/umed-indulkar/orbital-anomaly-openenv/blob/main/Orbital_Anomaly_openenv_V2.ipynb)
+[![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/umed-indulkar/orbital-anomaly-openenv/blob/main/Orbital_Anomaly_openenv.ipynb)
 [![Blog](https://img.shields.io/badge/📝_Blog-Read_Here-lightgrey)](./blog.md)
 [![Tests](https://img.shields.io/badge/Tests-8%2F8_passing-brightgreen)](#-tests)
 
@@ -388,7 +388,7 @@ orbital-anomaly-openenv/
 ├── client.py                                        # Typed Python client
 ├── inference.py                                     # Multi-agent baseline + LLM policy
 ├── test_reward.py                                   # Complete V2 test suite
-├── Orbital_Anomaly_openenv_V2.ipynb                 # GRPO training notebook (v4.1)
+├── Orbital_Anomaly_openenv.ipynb                 # GRPO training notebook (v4.1)
 ├── blog.md                                          # Plain-English explainer + images
 ├── images/                                          # All blog/training visualizations
 │   ├── task_snapshot.png
@@ -465,7 +465,7 @@ A complete beginner-friendly walkthrough of how this was built, what it does, an
 |----------|-----|
 | 🤗 Live Space | https://codequasar-orbital-anomaly-openenv.hf.space |
 | 📖 Swagger Docs | https://codequasar-orbital-anomaly-openenv.hf.space/docs |
-| 📓 Training Colab | [Orbital_Anomaly_openenv_V2.ipynb](https://colab.research.google.com/github/umed-indulkar/orbital-anomaly-openenv/blob/main/Orbital_Anomaly_openenv_V2.ipynb) |
+| 📓 Training Colab | [Orbital_Anomaly_openenv.ipynb](https://colab.research.google.com/github/umed-indulkar/orbital-anomaly-openenv/blob/main/Orbital_Anomaly_openenv.ipynb) |
 | 💾 GitHub | https://github.com/umed-indulkar/orbital-anomaly-openenv |
 | 📝 Blog | [blog.md](./blog.md) |
 
