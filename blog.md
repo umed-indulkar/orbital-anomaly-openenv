@@ -6,7 +6,7 @@
 
 Okay, let me just show you something cool first.
 
-Imagine you're working at a space agency. It's 3am. Your phone rings. A satellite worth €500 million is 400 kilometres above Earth, and something has gone wrong. The battery is draining. The solar panels aren't charging it properly. The thermal system is overheating. The comms link is going fuzzy. And you have **12 decision windows**, 12 chances to send the right command, before it becomes unrecoverable.
+Imagine you're working at a space agency. It's 3am. Your phone rings. A satellite worth €500 million is 400 kilometres above Earth, and something has gone wrong. The battery is draining. The solar panels aren't charging it properly. The thermal system is overheating. The comms link is going fuzzy. And you have **20 decision windows**, 12 chances to send the right command, before it becomes unrecoverable.
 
 Ground station is out of view. You can't call anyone. You're on your own.
 
@@ -240,15 +240,15 @@ On the medium task, the trained model learned to *keep* the payload running duri
 
 ---
 
-## The 36-step extended mission
+## The 80-step extended mission
 
-The basic tasks are 12 steps each. But there's also an extended mode: **36 steps across three phases**.
+The basic tasks are 12 steps each. But there's also an extended mode: **80 steps across four phases**.
 
-Phase 0 is an EPS crisis. Phase 1 is a thermal crisis. Phase 2 is a comms crisis. And here's the catch: **the state carries over between phases**. If you burn through your battery reserves fixing the EPS crisis in Phase 0, you enter Phase 1 with less power to deal with the thermal problem.
+Phase 0 is an EPS crisis. Phase 1 is a thermal crisis. Phase 2 is a comms crisis. Phase 3 is a combined cascade — radiation zone returns, wheels re-saturate, and the previous phase damage compounds. And here's the catch: **the state carries over between phases**. If you burn through your battery reserves fixing the EPS crisis in Phase 0, you enter Phase 1 with less power to deal with the thermal problem.
 
-You can't optimize each phase independently. The AI has to think 36 steps ahead, across three different crises, where the mistakes you make in Phase 0 make Phase 2 harder.
+You can't optimize each phase independently. The AI has to think 36 steps ahead, across three different crises, where the mistakes you make in Phase 0 make Phase 2 harder — and Phase 3 worst of all.
 
-![36-step telemetry timeline with phase bands showing all subsystems](images/telemetry_timeline_36step.png)
+![36-step telemetry timeline with phase bands showing all subsystems](images/telemetry_timeline_80step.png)
 
 This is what "long-horizon planning" actually looks like.
 
@@ -274,7 +274,7 @@ Here's where the project stands:
 
 I'd rather tell you the weaknesses than have you find them:
 
-**12 steps is short.** Some long-horizon benchmarks run 300+ steps. 12 steps (or 36 in extended mode) is real but not extreme.
+**Steps are still limited.** Each predefined task runs 20 steps. The extended mission runs 80 steps across 4 phases — which is meaningful, but top long-horizon benchmarks run 300+. The 80-step version requires the agent to plan across cascading failure modes that compound across phases, which is the closest we get to real multi-orbit mission planning at this scale.
 
 **The physics is simplified.** Real satellites have stochastic sensor noise, actuator lag, radiation effects on electronics. I traded some physical fidelity for reproducibility and clean reward signals.
 

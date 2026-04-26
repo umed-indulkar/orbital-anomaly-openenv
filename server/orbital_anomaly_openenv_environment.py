@@ -15,7 +15,7 @@ V2.2 adds over V2.1:
 Theme alignment (unchanged from V2.1):
   • Theme 3 (World Modeling): 13-fault causal graph, partial observability,
     fault belief state inference from symptoms in metadata.fault_beliefs
-  • Theme 2 (Long-Horizon Planning): 36-step Extended Mission Mode,
+  • Theme 2 (Long-Horizon Planning): 80-step Extended Mission Mode,
     inter-phase state persistence, delayed consequence reasoning
 
 Public API identical to V2.1:
@@ -58,9 +58,9 @@ _F_TRANSPONDER_HOT   = "transponder_overheating"
 _F_AMPLIFIER_DEGRADE = "amplifier_degradation"
 _F_ANTENNA_STALL     = "antenna_gimbal_stall"
 
-_MAX_PHASE_STEPS = 12
-_NUM_PHASES      = 3
-_EXTENDED_MAX    = _MAX_PHASE_STEPS * _NUM_PHASES  # 36
+_MAX_PHASE_STEPS = 20        # increased from 12 → 20 steps per phase
+_NUM_PHASES      = 4         # increased from 3 → 4 phases (80 total steps)
+_EXTENDED_MAX    = _MAX_PHASE_STEPS * _NUM_PHASES  # 80 steps extended mission
 
 
 class OrbitalAnomalyOpenenvEnvironment(Environment):
@@ -68,10 +68,11 @@ class OrbitalAnomalyOpenenvEnvironment(Environment):
     V2.2 satellite anomaly response simulator.
 
     Extended Mission Mode:
-      36 steps across 3 anomaly phases. Battery + thermal carry over.
-      Phase 0: EPS Crisis    (steps  1-12)
-      Phase 1: Thermal Crisis (steps 13-24)
-      Phase 2: Comms Crisis   (steps 25-36)
+      80 steps across 4 anomaly phases. Battery + thermal carry over.
+      Phase 0: EPS Crisis         (steps  1-20)
+      Phase 1: Thermal Crisis     (steps 21-40)
+      Phase 2: Comms Crisis       (steps 41-60)
+      Phase 3: Combined Cascade   (steps 61-80)  ← new
 
     Key V2.2 addition — heuristic_action():
       Eclipse-aware, context-sensitive heuristic. Used by the GRPO reward
@@ -144,7 +145,7 @@ class OrbitalAnomalyOpenenvEnvironment(Environment):
         self.task_id = resolved_task
         self._phase       = 0
         self._phase_step  = 0
-        self._phase_rewards = [[], [], []]
+        self._phase_rewards = [[], [], [], []]
         self._episode_actions = []
         self._load_task(resolved_task)
         return self._get_observation(reward=self._safe_reward(0.45), done=False)
@@ -360,6 +361,23 @@ class OrbitalAnomalyOpenenvEnvironment(Environment):
             self._faults.add(_F_ANTENNA_STALL)
             self._fault_timers[_F_TRANSPONDER_HOT] = 0
             self._fault_timers[_F_ANTENNA_STALL]   = 0
+        elif phase == 3:
+            # Phase 3: Combined cascade — all three subsystems under stress
+            # Radiation zone returns, wheel saturation accelerates,
+            # battery aging compounds. Requires multi-system reasoning.
+            self.radiation_zone     = True
+            self.wheel_saturation_level = max(self.wheel_saturation_level, 0.70)
+            self.reaction_wheel_momentum = max(self.reaction_wheel_momentum, 0.70)
+            self.battery_soc        = min(self.battery_soc, saved_soc)  # no boost
+            self.charge_controller_health = min(self.charge_controller_health, 0.55)
+            self.panel_health       = min(self.panel_health, 0.55)
+            self.payload_temp       = max(saved_temp, 72.0)
+            self.bit_error_rate     = max(self.bit_error_rate, 0.12)
+            self._faults.add(_F_MPPT_STUCK)
+            self._faults.add(_F_RW_SATURATION)
+            self._faults.add(_F_HEAT_PIPE_FAIL)
+            for f in [_F_MPPT_STUCK, _F_RW_SATURATION, _F_HEAT_PIPE_FAIL]:
+                self._fault_timers.setdefault(f, 0)
         self.battery_soc  = saved_soc
         self.payload_temp = saved_temp
 
@@ -378,7 +396,7 @@ class OrbitalAnomalyOpenenvEnvironment(Environment):
         self.ground_station_visible = (step % 14) < 6
         self.radiation_zone = (step % 20 == 15)
         self.observation_window_active = (
-            self.observation_window_active and step <= 8
+            self.observation_window_active and step <= 12
         ) or (step % 18 == 12)
 
     # ── Action application ────────────────────────────────────────────

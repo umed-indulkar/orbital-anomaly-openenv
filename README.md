@@ -29,7 +29,7 @@ A **spacecraft digital-twin mission-control benchmark** for training LLM agents 
 | Theme | Strength | Evidence |
 |-------|----------|---------|
 | **Theme 3.1 — World Modeling** (Primary) | ⭐⭐⭐ | 13-fault latent causal graph. Agent must infer hidden fault state from observable symptoms. Fault belief state exposed in every observation's `metadata.fault_beliefs`. |
-| **Theme 2 — Long-Horizon Planning** | ⭐⭐⭐ | 36-step Extended Mission Mode (3 phases × 12 steps). Inter-phase state persistence: poor Phase 1 decisions make Phase 2 harder. |
+| **Theme 2 — Long-Horizon Planning** | ⭐⭐⭐ | 80-step Extended Mission Mode (4 phases × 20 steps). Inter-phase state persistence: poor Phase 1 decisions make Phase 2 harder — and Phase 3 worst of all. |
 | **Theme 1 — Multi-Agent (Fleet AI bonus)** | ⭐⭐ | `MissionCommanderAgent` oversees `EPSSpecialistAgent`, `ThermalSpecialistAgent`, `CommsSpecialistAgent`. Commander explains delegation decisions. |
 
 **Scaler AI Labs bonus**: Spacecraft mission operations is an enterprise workflow — physical KPIs (battery SOC, thermal margins), incident management (fault response), resource allocation (science vs survivability).
@@ -257,13 +257,13 @@ Judges watch the agent build its world model in real time. Available via `obs.me
 ## 🔄 Extended Mission Mode (Theme 2: Long-Horizon)
 
 ```
-Phase 0: EPS Crisis        Phase 1: Thermal Crisis    Phase 2: Comms Crisis
+Phase 0: EPS (1-20)       Phase 1: Thermal (21-40)   Phase 2: Comms (41-60)    Phase 3: Cascade (61-80)
 ┌──────────────────┐       ┌──────────────────┐       ┌──────────────────┐
 │ Steps  1-12      │──────▶│ Steps 13-24      │──────▶│ Steps 25-36      │
 │ SOC:  22-38%     │       │ Temp: 79°C+      │       │ BER:  0.18+      │
 │ Solar: degraded  │       │ Radiator fault   │       │ Antenna stall    │
 └──────────────────┘       └──────────────────┘       └──────────────────┘
-         ↑─────────── battery_soc + payload_temp CARRY OVER ──────────────↑
+         ↑─────────── battery_soc + payload_temp + wheel_sat CARRY OVER ─────↑
 ```
 
 Poor battery management in Phase 0 → lower SOC entering Phase 1 → thermal mitigation harder. The optimal policy **cannot** be computed phase-by-phase in isolation.

@@ -176,7 +176,7 @@ async def step_with_rationale(request: Request) -> JSONResponse:
 
 # ── Shared episode runner (used by both /run_episode and /run_custom) ──────────
 def _run_episode_steps(env: OrbitalAnomalyOpenenvEnvironment, obs,
-                       task_label: str, max_steps: int = 12):
+                       task_label: str, max_steps: int = 20):
     steps = []
     total_reward = 0.0
 
@@ -837,7 +837,7 @@ svg.rchart{width:100%;height:52px;display:block}
   <div class="feed-wrap" id="feed-wrap">
     <div class="idle" id="idle-el">
       <div class="idle-icon">🛰️</div>
-      <div class="idle-txt">SELECT A MISSION ABOVE<br>THE MULTI-AGENT AI EXECUTES 12 DECISION STEPS<br>COMMANDER DELEGATES TO 3 SPECIALIST AGENTS<br>WORLD MODEL: 13-FAULT BELIEF STATE PER STEP</div>
+      <div class="idle-txt">SELECT A MISSION ABOVE<br>THE MULTI-AGENT AI EXECUTES 20 DECISION STEPS<br>COMMANDER DELEGATES TO 3 SPECIALIST AGENTS<br>WORLD MODEL: 13-FAULT BELIEF STATE PER STEP</div>
       <div class="idle-pills">
         <span class="idle-pill theme">THEME 3 · WORLD MODELING</span>
         <span class="idle-pill theme">THEME 2 · LONG-HORIZON PLANNING</span>
@@ -1027,7 +1027,7 @@ function resetUI(taskLabel){
   document.getElementById('stat-strip').style.display='flex';
   document.getElementById('header-center').style.display='flex';
   document.getElementById('hc-task').textContent=taskLabel.toUpperCase();
-  document.getElementById('hc-step').textContent='0/12';document.getElementById('hc-phase').textContent='1/3';document.getElementById('hc-avg').textContent='—';
+  document.getElementById('hc-step').textContent='0/20';document.getElementById('hc-phase').textContent='1/4';document.getElementById('hc-avg').textContent='—';
 }
 
 async function renderSteps(data){
@@ -1038,7 +1038,7 @@ async function renderSteps(data){
     const icon=ICONS[s.action]||'⚡',cls=rClass(s.reward),col=rColor(s.reward);
     if(s.reward>peakReward)peakReward=s.reward;
     document.getElementById('hc-step').textContent=`${i+1}/${data.steps.length}`;
-    document.getElementById('hc-phase').textContent=`${(wm.phase||0)+1}/3`;
+    document.getElementById('hc-phase').textContent=`${(wm.phase||0)+1}/4`;
     document.getElementById('ls-bat').textContent=t.battery_soc+'%';
     document.getElementById('ls-bat').style.color=t.battery_soc<20?'var(--red)':t.battery_soc<40?'var(--amber)':'var(--cyan)';
     document.getElementById('ls-temp').textContent=t.thermal_temp+'°C';

@@ -34,7 +34,7 @@ ENV_BASE_URL      = os.getenv("ENV_BASE_URL",
                                "https://codequasar-orbital-anomaly-openenv.hf.space")
 BENCHMARK         = "orbital_anomaly_openenv"
 TASKS             = ["easy", "medium", "hard"]
-MAX_STEPS         = 12
+MAX_STEPS         = 20
 SUCCESS_THRESHOLD = 0.45
 VALID_ACTIONS     = [
     "rotate_to_sun", "disable_payload", "reboot_comms",
@@ -216,7 +216,7 @@ def _build_prompt(obs: OrbitalAnomalyOpenenvObservation,
     eclipse_warn = "\n⚠️  ECLIPSE ACTIVE — rotate_to_sun is USELESS" if not sunlit else ""
 
     return (
-        f"TELEMETRY — Step {step}/{MAX_STEPS}  Phase {phase+1}/3{eclipse_warn}\n\n"
+        f"TELEMETRY — Step {step}/{MAX_STEPS}  Phase {phase+1}/4{eclipse_warn}\n\n"
         f"Battery:  {bat:.1f}%   [{flag(bat, 20, 40)}]\n"
         f"Solar:    {sol:.1f}%   [{flag(sol, 30, 60)}]  Sunlit={sunlit}\n"
         f"Thermal:  {temp:.1f}C  [{'CRITICAL' if temp>85 else 'WARNING' if temp>70 else 'OK'}]\n"
@@ -353,7 +353,7 @@ def main() -> None:
         print("[PROXY] no API key — heuristic baseline", flush=True)
 
     print("[INFO] Theme 3 (World Modeling): 13-fault belief state each step", flush=True)
-    print("[INFO] Theme 2 (Long-Horizon):   36-step Extended Mission Mode", flush=True)
+    print("[INFO] Theme 2 (Long-Horizon):   80-step Extended Mission Mode (4 phases × 20 steps)", flush=True)
     print("[INFO] Multi-Agent: MissionCommander + EPS/Thermal/Comms specialists", flush=True)
     print("[INFO] Rationale: every action includes agent explanation", flush=True)
 
