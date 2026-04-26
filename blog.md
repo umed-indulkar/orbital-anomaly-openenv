@@ -14,6 +14,8 @@ That's the scenario I built for an AI to learn. And then I watched the AI figure
 
 ---
 
+![Satellite in Low earth orbit](images/satellite.png)
+
 ## Wait, what is this exactly?
 
 I built a **simulated spacecraft that breaks in realistic ways**, and then trained an AI agent to fix it.
