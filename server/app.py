@@ -130,8 +130,9 @@ def _apply_custom_state(env: OrbitalAnomalyOpenenvEnvironment, custom: dict) -> 
 
     # Disable extended mission so phases don't inject new anomalies
     # and overwrite the user's chosen starting conditions mid-episode
+    # NOTE: do NOT set env.task_id = "custom" — Pydantic model only accepts
+    # 'easy'|'medium'|'hard' and will crash on observation construction
     env._extended_mission = False
-    env.task_id = "custom"
 
 
 # ── /reset override ────────────────────────────────────────────────────────────
@@ -190,18 +191,47 @@ def _run_episode_steps(env: OrbitalAnomalyOpenenvEnvironment, obs,
             comms  = max(0.0, min(1.0, 1.0 - ber * 5.0 - plr))
             sunlit = bool(getattr(o, "sunlit", True))
             payl   = bool(o.payload_on) if o.payload_on is not None else True
-            if bat < 12:                          return "switch_power_bus", "[EPS|99%] CRITICAL: battery at floor"
-            if bat < 30 and not sunlit:           return "switch_power_bus", "[EPS|94%] Eclipse + low battery — solar useless"
-            if bat < 20 and sol < 0.35:           return "rotate_to_sun",   "[EPS|91%] CRITICAL: battery low, solar misaligned"
-            if temp > 84:                         return "enter_safe_mode",  "[Thermal|98%] CRITICAL: thermal cascade imminent"
-            if temp > 74 and payl:                return "disable_payload",  "[Thermal|91%] CRITICAL: payload heat critical"
-            if bat < 38 and not sunlit:           return "switch_power_bus", "[EPS|82%] Eclipse: activate power reserve"
-            if bat < 35:                          return "rotate_to_sun",    "[EPS|78%] Battery warning — realign solar"
-            if comms < 0.22 and bat > 25:         return "reboot_comms",     "[Comms|97%] CRITICAL: link near loss"
-            if sol < 0.42 and sunlit:             return "rotate_to_sun",    "[EPS|65%] Solar suboptimal — realign"
-            if comms < 0.50:                      return "reboot_comms",     "[Comms|55%] Comms degraded"
-            if temp > 62 and payl:                return "disable_payload",  "[Thermal|58%] Proactive thermal management"
-            if sol < 0.70 and sunlit:             return "rotate_to_sun",    "[EPS|40%] Solar improvement possible"
+
+            # KEY INSIGHT: rotating costs power (attitude thrusters).
+            # Only rotate when solar gain will exceed the rotation cost.
+            # If sol is already < 0.35 after being sunlit, MPPT is stuck —
+            # rotating won't help and wastes battery. Ban it.
+            rotate_worthwhile = sunlit and sol > 0.30
+
+            # ── CRITICAL: battery ─────────────────────────────────────────────
+            if bat < 12:
+                return "switch_power_bus", "[EPS|99%] CRITICAL: battery floor"
+            if bat < 22 and not sunlit:
+                return "switch_power_bus", "[EPS|97%] CRITICAL: eclipse + battery critical"
+            # ── CRITICAL: thermal ─────────────────────────────────────────────
+            if temp > 84:
+                return "enter_safe_mode",  "[Thermal|99%] CRITICAL: cascade imminent"
+            if temp > 74 and payl:
+                return "disable_payload",  "[Thermal|93%] CRITICAL: payload heat"
+            # ── WARNING: eclipse battery ──────────────────────────────────────
+            if bat < 45 and not sunlit:
+                return "switch_power_bus", "[EPS|87%] Eclipse: protect battery reserve"
+            # ── WARNING: battery in sunlight — only rotate if worthwhile ──────
+            if bat < 30 and rotate_worthwhile:
+                return "rotate_to_sun",    "[EPS|80%] Battery low — realign solar"
+            if bat < 30 and not rotate_worthwhile:
+                return "switch_power_bus", "[EPS|80%] Battery low + solar impaired — use reserve"
+            # ── WARNING: comms — only reboot if there's realistic hope ─────
+            # Skip reboot when comms has been 0 for a while (multi-fault hard
+            # task) — transponder + antenna faults make reboot useless
+            comms_rebootable = comms < 0.20 and bat > 28 and sol > 0.05
+            if comms_rebootable:
+                return "reboot_comms",     "[Comms|97%] CRITICAL: link near loss"
+            # ── PROACTIVE: thermal ────────────────────────────────────────────
+            if temp > 62 and payl:
+                return "disable_payload",  "[Thermal|65%] Proactive thermal management"
+            # ── PROACTIVE: solar — only when genuinely worthwhile ─────────────
+            if sol < 0.45 and rotate_worthwhile:
+                return "rotate_to_sun",    "[EPS|60%] Solar suboptimal — realign"
+            if comms < 0.50 and bat > 40 and sol > 0.05:
+                return "reboot_comms",     "[Comms|55%] Comms degraded"
+            if sol < 0.72 and rotate_worthwhile and bat < 65:
+                return "rotate_to_sun",    "[EPS|38%] Solar improvement possible"
             return "noop", "[Commander] All systems nominal"
         except Exception:
             return "noop", "[Commander] Heuristic error — holding"
@@ -391,10 +421,11 @@ async def run_custom_episode(request: Request) -> JSONResponse:
         obs = env.reset(task_id=base_task)
         # Overlay user's custom conditions
         _apply_custom_state(env, body)
-        # Build a fresh obs reflecting the overridden state (no step taken)
-        obs = env._get_observation(reward=env._safe_reward(0.45), done=False)
+        # Take a noop step so physics updates and we get a real obs
+        # reflecting the custom state — avoids calling private env methods
+        obs = env.step(OrbitalAnomalyOpenenvAction(action_type="noop"))
 
-        steps, avg, obs = _run_episode_steps(env, obs, "custom")
+        steps, avg, obs = _run_episode_steps(env, obs, "custom", max_steps=19)
 
         return JSONResponse({
             "task_id":      "custom",
@@ -1045,13 +1076,13 @@ async function renderSteps(data){
     document.getElementById('ls-temp').style.color=t.thermal_temp>85?'var(--red)':t.thermal_temp>70?'var(--amber)':'var(--cyan)';
     document.getElementById('ls-comms').textContent=t.comms_signal+'%';
     document.getElementById('ls-comms').style.color=t.comms_signal<30?'var(--red)':t.comms_signal<60?'var(--amber)':'var(--cyan)';
-    document.getElementById('ls-phase').textContent='P'+((wm.phase||0)+1)+'/3';
+    document.getElementById('ls-phase').textContent='P'+((wm.phase||0)+1)+'/4';
     document.getElementById('ls-dom').textContent=(wm.dominant_subsystem||'—').toUpperCase();
     updateSubsysBars(t);
     const glow=document.getElementById('sat-glow');
     if(t.mission_status==='critical'){glow.className='sat-glow crit'}else if(t.mission_status==='warning'){glow.className='sat-glow warn'}else{glow.className='sat-glow'}
     document.getElementById('wm-ticker').innerHTML=
-      `WORLD MODEL — Dom: <span>${(wm.dominant_subsystem||'?').toUpperCase()}</span> &nbsp;·&nbsp; ${wm.top_faults||'—'} &nbsp;·&nbsp; Phase <span>${(wm.phase||0)+1}/3</span>`+
+      `WORLD MODEL — Dom: <span>${(wm.dominant_subsystem||'?').toUpperCase()}</span> &nbsp;·&nbsp; ${wm.top_faults||'—'} &nbsp;·&nbsp; Phase <span>${(wm.phase||0)+1}/4</span>`+
       (!t.sunlit?' &nbsp;·&nbsp; <span style="color:var(--amber)">🌑 ECLIPSE</span>':'')+
       (!t.gs_visible?' &nbsp;·&nbsp; <span style="color:var(--red)">GS BLACKOUT</span>':'')+
       (t.safe_mode?' &nbsp;·&nbsp; <span style="color:var(--red)">SAFE MODE</span>':'');
