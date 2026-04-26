@@ -420,7 +420,7 @@ svg.rchart{width:100%;height:52px;display:block}
     <a href="/docs" class="hlink">API DOCS</a>
     <a href="/state" class="hlink">RAW STATE</a>
     <a href="https://github.com/umed-indulkar/orbital-anomaly-openenv" class="hlink" target="_blank">GITHUB</a>
-    <a href="https://colab.research.google.com/github/umed-indulkar/orbital-anomaly-openenv/blob/main/Orbital_Anomaly_openenv_V2.ipynb" class="hlink hl-green" target="_blank">▶ TRAIN</a>
+    <a href="https://colab.research.google.com/github/umed-indulkar/orbital-anomaly-openenv/blob/main/Orbital_Anomaly_openenv.ipynb" class="hlink hl-green" target="_blank">▶ TRAIN</a>
   </div>
 </header>
 <main>
