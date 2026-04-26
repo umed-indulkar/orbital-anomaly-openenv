@@ -14,11 +14,13 @@ That's the scenario I built for an AI to learn. And then I watched the AI figure
 
 ---
 
+![Satellite in Low earth orbit](images/satellite.png)
+
 ## Wait, what is this exactly?
 
 I built a **simulated spacecraft that breaks in realistic ways**, and then trained an AI agent to fix it.
 
-This is called a **reinforcement learning environment**. Think of it like a spacecraft mission control simulator — an AI learning to manage a dying satellite. Every "move" the AI makes gets a score. Over time, the AI learns which moves lead to better scores, and gets better at the job.
+This is called a **reinforcement learning environment**. Think of it like a spacecraft mission control simulator, it's an AI learning to manage a dying satellite. Every "move" the AI makes gets a score. Over time, the AI learns which moves lead to better scores, and gets better at the job.
 
 The environment is called **Orbital Anomaly OpenEnv**. It's live, it's real, and you can talk to it right now via an API.
 
@@ -28,7 +30,7 @@ The environment is called **Orbital Anomaly OpenEnv**. It's live, it's real, and
 
 Because it's a perfect test for AI decision-making.
 
-Real spacecraft have **cascading failures** — one thing breaks, which causes another thing to break, which causes another. An AI that can handle this kind of situation has learned something genuinely useful: how to reason about causes and consequences, how to plan ahead, and how to make tradeoffs.
+Real spacecraft have **cascading failures** , one thing breaks, which causes another thing to break, which causes another. An AI that can handle this kind of situation has learned something genuinely useful: how to reason about causes and consequences, how to plan ahead, and how to make tradeoffs.
 
 Here's a real example of how satellite failures cascade:
 
@@ -72,7 +74,7 @@ I built three scenarios the AI has to handle:
 
 The solar panels are misaligned. Battery is draining. One hidden fault (the solar charge controller is stuck). The AI just needs to rotate the spacecraft back toward the sun and recover.
 
-*(Chart: initial telemetry snapshot for all 3 tasks — see images/task_snapshot.png on GitHub)*
+![Task snapshot showing initial telemetry for all 3 tasks](images/task_snapshot.png)
 
 **🟡 Medium — Two things are broken, and you have a tough choice**
 
@@ -106,11 +108,11 @@ There are 13 possible hidden faults in this environment:
 - `amplifier_degradation` — signal amplifier weakening
 - `antenna_gimbal_stall` — antenna can't track
 
-The AI never sees these directly. It has to *infer* them — like a doctor diagnosing a patient from symptoms, not from a lab report.
+The AI never sees these directly. It has to *infer* them, like a doctor diagnosing a patient from symptoms, not from a lab report.
 
-For example: if the battery is draining faster than expected, but the solar panels look physically healthy, that pattern suggests the solar charge controller (`mppt_stuck`) is broken — not the panels themselves. Different fault, different fix.
+For example: if the battery is draining faster than expected, but the solar panels look physically healthy, that pattern suggests the solar charge controller (`mppt_stuck`) is broken, not the panels themselves. Different fault, different fix.
 
-Every step, the AI maintains a "belief state" — a probability estimate for each of the 13 faults:
+Every step, the AI maintains a "belief state", a probability estimate for each of the 13 faults:
 
 ```
 mppt_stuck              ████████████████░░  78%  ← inferred from low solar output
@@ -122,7 +124,7 @@ heat_pipe_failure       ███████░░░░░░░░░░░  
 
 And this belief updates every single step as new sensor data comes in.
 
-*(Chart: fault belief state evolving over 5 steps — see images/fault_belief_evolution.png on GitHub)*
+![Fault belief state evolving over 5 steps in the hard task](images/fault_belief_evolution.png)
 
 ---
 
@@ -141,7 +143,7 @@ The AI has exactly 6 possible actions at each step:
 
 The AI picks one action per step. Twelve steps to save the spacecraft.
 
-One thing the AI *must* learn: **`rotate_to_sun` does absolutely nothing when the spacecraft is in eclipse**. There's no sun. Before training, the AI keeps trying to rotate toward the sun even in the dark — just burning through its decision window doing nothing. After training, it learns to switch to the backup power bus instead.
+One thing the AI *must* learn: **`rotate_to_sun` does absolutely nothing when the spacecraft is in eclipse**. There's no sun. Before training, the AI keeps trying to rotate toward the sun even in the dark, just burning through its decision window doing nothing. After training, it learns to switch to the backup power bus instead.
 
 ---
 
@@ -201,7 +203,7 @@ And critically: the reward is mathematically guaranteed to never be exactly 0 or
 
 Not good.
 
-*(Chart: baseline reward distributions before training — see images/baseline_distributions.png on GitHub)*
+![Baseline reward distributions before training](images/baseline_distributions.png)
 
 Before training, the AI basically flails. It tries `rotate_to_sun` in eclipse. It ignores the thermal cascade building up. It reboots comms when the battery is too low to safely do so. It doesn't understand that shutting the camera off now prevents a comms failure in 5 steps.
 
@@ -213,7 +215,7 @@ Average reward on the hard task: around 0.08 out of 1.0.
 
 Better. Meaningfully better.
 
-*(Chart: training reward curve showing improvement — see images/training_analysis.png on GitHub)*
+![Training reward curve showing improvement over GRPO training steps](images/training_analysis.png)
 
 After GRPO training:
 
@@ -234,7 +236,7 @@ The untrained model waits until the temperature is already critical before disab
 **3. Hold the camera on when there's an observation window.**  
 On the medium task, the trained model learned to *keep* the payload running during an active imaging window to collect the +0.12 science bonus — as long as temperatures are manageable. It's balancing two objectives at once.
 
-*(Chart: action policy heatmap before vs after training — see images/action_policy_heatmap.png on GitHub)*
+![Action policy heatmap: before vs after training](images/action_policy_heatmap.png)
 
 ---
 
@@ -246,7 +248,7 @@ Phase 0 is an EPS crisis. Phase 1 is a thermal crisis. Phase 2 is a comms crisis
 
 You can't optimize each phase independently. The AI has to think 36 steps ahead, across three different crises, where the mistakes you make in Phase 0 make Phase 2 harder.
 
-*(Chart: 36-step telemetry timeline with phase bands — see images/telemetry_timeline_36step.png on GitHub)*
+![36-step telemetry timeline with phase bands showing all subsystems](images/telemetry_timeline_36step.png)
 
 This is what "long-horizon planning" actually looks like.
 
@@ -254,7 +256,7 @@ This is what "long-horizon planning" actually looks like.
 
 ## The final scoreboard
 
-*(Chart: final results dashboard — see images/final_dashboard.png on GitHub)*
+![Final dashboard showing all results in one view](images/final_dashboard.png)
 
 Here's where the project stands:
 
@@ -313,6 +315,7 @@ with OrbitalAnomalyOpenenvEnv(
     print(f"Thermal: {obs.thermal_temp:.1f}°C")
     print(f"What's probably broken: {obs.metadata['fault_beliefs']}")
 
+    # What would you do?
     result = env.step(OrbitalAnomalyOpenenvAction(action_type="switch_power_bus"))
     print(f"Reward after your action: {result.reward:.4f}")
 ```
